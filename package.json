@@ -1,0 +1,17 @@
+{
+  "name": "pi-ollama-provider",
+  "version": "1.0.0",
+  "description": "Ollama provider for pi — auto-discovers local models, detects vision/reasoning, auto-pulls on demand with progress bar",
+  "keywords": [
+    "pi-package"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "main": "extensions/pi-ollama-provider/index.ts",
+  "pi": {
+    "extensions": ["./extensions"],
+    "skills": [],
+    "prompts": [],
+    "themes": []
+  }
+}
