@@ -24,7 +24,7 @@ const CACHE_PATH = join(CONFIG_DIR, "ollama-models-cache.json");
 const CONFIG_PATH = join(CONFIG_DIR, "ollama-config.json");
 
 const DEFAULT_LOCAL_URL = "http://localhost:11434";
-const DEFAULT_CLOUD_URL = "https://api.ollama.com";
+const DEFAULT_CLOUD_URL = "https://ollama.com";
 
 let localModelNames = new Set<string>();
 let pullingModels = new Set<string>();
@@ -390,20 +390,82 @@ async function startOllamaService(pi: ExtensionAPI, ctx: any): Promise<boolean> 
   }
 }
 
+/** Ensure ollama CLI is installed and running. Returns true if ready. */
+async function ensureOllamaCli(pi: ExtensionAPI, ctx: any): Promise<boolean> {
+  const isInstalled = await checkOllamaInstalled(pi);
+
+  if (!isInstalled) {
+    const install = await ctx.ui.confirm(
+      "Ollama not found",
+      "Ollama CLI is not installed on this machine. Install it now?",
+    );
+
+    if (!install) {
+      ctx.ui.notify("Setup cancelled. Install Ollama manually: https://ollama.com/download", "warning");
+      return false;
+    }
+
+    const installed = await installOllama(pi, ctx);
+    if (!installed) return false;
+  }
+
+  // Check if Ollama is running
+  const isRunning = await checkOllamaRunning();
+  if (!isRunning) {
+    const start = await ctx.ui.confirm(
+      "Ollama not running",
+      "Ollama is installed but not running. Start it now?",
+    );
+
+    if (start) {
+      const started = await startOllamaService(pi, ctx);
+      if (!started) return false;
+    } else {
+      ctx.ui.notify("Start Ollama manually with 'ollama serve' before using models.", "warning");
+      return false;
+    }
+  }
+
+  return true;
+}
+
 async function runSetupWizard(pi: ExtensionAPI, ctx: any): Promise<void> {
-  // Step 1: Choose connection mode
+  // Step 1: Local or Cloud?
   const mode = await ctx.ui.select(
-    "🦙 Ollama Setup — How would you like to connect?",
+    "🦙 Ollama Setup — How would you like to use Ollama?",
     [
-      "Local — Run models on this machine",
-      "Cloud — Connect to ollama.com (API key required)",
+      "Local — Run models on this machine (requires Ollama CLI)",
+      "Cloud — Use cloud models on ollama.com",
     ],
   );
 
   if (!mode) return; // cancelled
 
-  if (mode.startsWith("Cloud")) {
-    // ── Cloud setup ──
+  if (mode.startsWith("Local")) {
+    // ── Local setup: install/start ollama, discover models ──
+    const ready = await ensureOllamaCli(pi, ctx);
+    if (!ready) return;
+
+    currentConfig = { mode: "local", baseUrl: DEFAULT_LOCAL_URL };
+    writeConfig(currentConfig);
+    await registerOllamaProvider(pi);
+    ctx.ui.notify("✓ Setup complete! Use /models to see available Ollama models.", "info");
+    return;
+  }
+
+  // ── Cloud setup ──
+  const authMethod = await ctx.ui.select(
+    "🦙 Cloud Authentication — How would you like to authenticate?",
+    [
+      "API key — Enter an API key from ollama.com/settings/keys",
+      "Browser login — Install Ollama CLI and run 'ollama signin'",
+    ],
+  );
+
+  if (!authMethod) return; // cancelled
+
+  if (authMethod.startsWith("API key")) {
+    // ── Direct API key access to ollama.com (no local CLI needed) ──
     const apiKey = await ctx.ui.input(
       "Enter your Ollama API key (from ollama.com/settings/keys):",
       "",
@@ -414,13 +476,7 @@ async function runSetupWizard(pi: ExtensionAPI, ctx: any): Promise<void> {
       return;
     }
 
-    // Optionally let user customize the endpoint
-    const customUrl = await ctx.ui.input(
-      "Ollama cloud endpoint (press Enter for default):",
-      DEFAULT_CLOUD_URL,
-    );
-
-    const baseUrl = customUrl?.trim() || DEFAULT_CLOUD_URL;
+    const baseUrl = DEFAULT_CLOUD_URL;
 
     // Test the connection
     ctx.ui.setStatus("ollama-setup", "Testing cloud connection...");
@@ -448,8 +504,6 @@ async function runSetupWizard(pi: ExtensionAPI, ctx: any): Promise<void> {
       writeConfig(currentConfig);
 
       ctx.ui.notify(`✓ Connected to Ollama Cloud! ${modelCount} models available.`, "info");
-
-      // Refresh models
       await registerOllamaProvider(pi);
     } catch (err) {
       ctx.ui.setStatus("ollama-setup", undefined);
@@ -458,110 +512,29 @@ async function runSetupWizard(pi: ExtensionAPI, ctx: any): Promise<void> {
     return;
   }
 
-  // ── Local setup ──
-  const isInstalled = await checkOllamaInstalled(pi);
+  // ── Browser login: needs ollama CLI installed + 'ollama signin' ──
+  const ready = await ensureOllamaCli(pi, ctx);
+  if (!ready) return;
 
-  if (!isInstalled) {
-    const install = await ctx.ui.confirm(
-      "Ollama not found",
-      "Ollama is not installed on this machine. Install it now?",
-    );
-
-    if (!install) {
-      ctx.ui.notify("Setup cancelled. Install Ollama manually: https://ollama.com/download", "warning");
-      return;
-    }
-
-    const installed = await installOllama(pi, ctx);
-    if (!installed) return;
-  }
-
-  // Check if Ollama is running
-  const isRunning = await checkOllamaRunning();
-  if (!isRunning) {
-    const start = await ctx.ui.confirm(
-      "Ollama not running",
-      "Ollama is installed but not running. Start it now?",
-    );
-
-    if (start) {
-      const started = await startOllamaService(pi, ctx);
-      if (!started) return;
+  ctx.ui.notify("Running 'ollama signin'... Follow the browser prompts to authorize.", "info");
+  ctx.ui.setStatus("ollama-setup", "Waiting for ollama signin...");
+  try {
+    const result = await pi.exec("ollama", ["signin"], { timeout: 120000 });
+    ctx.ui.setStatus("ollama-setup", undefined);
+    if (result.code === 0) {
+      ctx.ui.notify("✓ Signed in! Cloud models are now available through your local Ollama.", "info");
     } else {
-      ctx.ui.notify("Start Ollama manually with 'ollama serve' before using models.", "warning");
-      return;
+      ctx.ui.notify(`Sign-in issue: ${result.stderr || result.stdout}`, "warning");
     }
+  } catch (err) {
+    ctx.ui.setStatus("ollama-setup", undefined);
+    ctx.ui.notify(`Sign-in error: ${err instanceof Error ? err.message : String(err)}`, "error");
+    return;
   }
 
-  // Ask about cloud model access
-  const wantCloud = await ctx.ui.confirm(
-    "Cloud models",
-    "Would you like to access Ollama cloud models (e.g. GPT, Claude via Ollama)?\nThis requires an Ollama account.",
-  );
-
-  if (wantCloud) {
-    const loginMethod = await ctx.ui.select(
-      "How would you like to authenticate for cloud models?",
-      [
-        "Browser login (ollama signin)",
-        "API key",
-      ],
-    );
-
-    if (!loginMethod) {
-      // Still save local config
-      currentConfig = { mode: "local", baseUrl: DEFAULT_LOCAL_URL };
-      writeConfig(currentConfig);
-      await registerOllamaProvider(pi);
-      ctx.ui.notify("✓ Local Ollama configured (no cloud models).", "info");
-      return;
-    }
-
-    if (loginMethod.startsWith("Browser")) {
-      ctx.ui.notify("Running 'ollama signin'... Follow the browser prompts.", "info");
-      ctx.ui.setStatus("ollama-setup", "Waiting for ollama signin...");
-      try {
-        const result = await pi.exec("ollama", ["signin"], { timeout: 120000 });
-        ctx.ui.setStatus("ollama-setup", undefined);
-        if (result.code === 0) {
-          ctx.ui.notify("✓ Signed in to Ollama! Cloud models should now be available.", "info");
-        } else {
-          ctx.ui.notify(`Sign-in output: ${result.stderr || result.stdout}`, "warning");
-        }
-      } catch (err) {
-        ctx.ui.setStatus("ollama-setup", undefined);
-        ctx.ui.notify(`Sign-in error: ${err instanceof Error ? err.message : String(err)}`, "error");
-      }
-
-      // Save local config (cloud access is via ollama signin, not API key)
-      currentConfig = { mode: "local", baseUrl: DEFAULT_LOCAL_URL };
-      writeConfig(currentConfig);
-    } else {
-      // API key flow for local+cloud
-      const apiKey = await ctx.ui.input(
-        "Enter your Ollama API key:",
-        "",
-      );
-
-      if (!apiKey) {
-        currentConfig = { mode: "local", baseUrl: DEFAULT_LOCAL_URL };
-        writeConfig(currentConfig);
-        ctx.ui.notify("✓ Local Ollama configured (no cloud API key).", "info");
-        await registerOllamaProvider(pi);
-        return;
-      }
-
-      currentConfig = { mode: "local", baseUrl: DEFAULT_LOCAL_URL, apiKey };
-      writeConfig(currentConfig);
-      ctx.ui.notify("✓ Local Ollama configured with API key for cloud models.", "info");
-    }
-  } else {
-    // Pure local
-    currentConfig = { mode: "local", baseUrl: DEFAULT_LOCAL_URL };
-    writeConfig(currentConfig);
-  }
-
-  // Refresh models with new config
+  // ollama signin routes cloud models through the local instance
+  currentConfig = { mode: "local", baseUrl: DEFAULT_LOCAL_URL };
+  writeConfig(currentConfig);
   await registerOllamaProvider(pi);
   ctx.ui.notify("✓ Setup complete! Use /models to see available Ollama models.", "info");
 }
