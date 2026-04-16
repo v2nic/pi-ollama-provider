@@ -22,14 +22,14 @@ Ollama provider extension for [pi](https://github.com/badlogic/pi-mono) — auto
 ## Install
 
 ```bash
-pi install github:v2nic/pi-ollama-provider
+pi install git:github.com/v2nic/pi-ollama-provider
 ```
 
-Or in `pi-config.ts`:
+Or in `settings.json`:
 
-```ts
+```json
 {
-  extensions: ['github:v2nic/pi-ollama-provider']
+  "packages": ["git:github.com/v2nic/pi-ollama-provider"]
 }
 ```
 
