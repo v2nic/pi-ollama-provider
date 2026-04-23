@@ -15,9 +15,11 @@ Ollama provider extension for [pi](https://github.com/badlogic/pi-mono) — auto
 - **Accurate context windows** — reads `.context_length` from `/api/show` for each model; falls back to 32K for local, 128K for cloud models
 - **Cloud model support** — models tagged `:cloud` are identified from local Ollama and displayed with a cloud label
 - **Auto-pull on select** — when you select an Ollama model that isn't installed locally, it auto-pulls with a streaming progress bar
+- **`/ollama-setup`** — interactive setup wizard: choose local or cloud, install Ollama, authenticate
 - **`/ollama-pull <model>`** — manually pull a model with progress bar
 - **`/ollama-refresh`** — re-discover models (e.g., after pulling from the CLI)
-- **Single source of truth** — only uses the local Ollama `/api/tags` endpoint
+- **Cloud direct connect** — connect directly to ollama.com with an API key (no local install needed)
+- **Single source of truth** — only uses the Ollama `/api/tags` endpoint (local or cloud)
 
 ## Install
 
@@ -33,9 +35,30 @@ Or in `settings.json`:
 }
 ```
 
-## Authentication with Ollama Cloud (optional)
+## Setup
 
-[Authenticate](https://docs.ollama.com/api/authentication) with Ollama Cloud to use cloud models. No API key setup required.
+Run the interactive setup wizard:
+
+```
+/ollama-setup
+```
+
+The wizard guides you through:
+
+1. **Local or Cloud** — choose whether to run models locally or connect to ollama.com
+2. **Local mode:**
+   - Installs Ollama if not found (`curl -fsSL https://ollama.com/install.sh | sh`)
+   - Starts the Ollama service if not running
+   - Optionally configures cloud model access via `ollama signin` or API key
+3. **Cloud mode:**
+   - Asks for your ollama.com API key
+   - Configures the extension to connect directly (no local Ollama required)
+
+Configuration is saved to `~/.pi/agent/ollama-config.json`.
+
+### Manual authentication (optional)
+
+[Authenticate](https://docs.ollama.com/api/authentication) with Ollama Cloud to use cloud models:
 
 ```bash
 ollama signin
@@ -53,6 +76,7 @@ Then on subsequent runs, it will use the cache and print:
 
 | Command | Description |
 |---------|-------------|
+| `/ollama-setup` | Interactive setup wizard (local or cloud) |
 | `/models` | Ollama models are available in the model list |
 | `/ollama-refresh` | Re-discover models from Ollama |
 | `/ollama-pull <model>` | Pull a model with streaming progress bar |
