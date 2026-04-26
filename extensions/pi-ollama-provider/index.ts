@@ -296,16 +296,21 @@ async function registerOllamaProvider(pi: ExtensionAPI): Promise<void> {
       }
     }
 
-    const isCloud = model.name.includes(":cloud") || (!localModelNames.has(model.name) && model.size > 100_000_000_000);
+    const isCloud = currentConfig.mode === "cloud" || model.name.includes(":cloud") || model.name.endsWith("-cloud") || (!localModelNames.has(model.name) && model.size > 100_000_000_000);
     if (isCloud && contextWindow === DEFAULT_CONTEXT_WINDOW) {
       contextWindow = 131072;
       maxTokens = 131072;
     }
 
+    // Generate cloud model ID: qwen3.5:397b -> qwen3.5:397b-cloud, gemini-3-flash-preview -> gemini-3-flash-preview:cloud
+    const modelId = isCloud && !model.name.endsWith("-cloud") && !model.name.includes(":cloud")
+      ? (model.name.includes(":") ? `${model.name}-cloud` : `${model.name}:cloud`)
+      : model.name;
+
     const isVision = hasVision(capabilities, modelInfo);
 
     return {
-      id: model.name,
+      id: modelId,
       name: isCloud ? `${model.name} (cloud)` : model.name,
       reasoning: capabilities.includes("thinking"),
       input: isVision ? ["text", "image"] as const : ["text"] as const,
