@@ -1,9 +1,16 @@
 /**
  * Ollama Auto-Discovery Extension
  *
- * Discovers models from the local Ollama instance and registers them
- * via pi.registerProvider(). Cloud models (:cloud tag) are marked accordingly.
- * Non-installed models are auto-pulled on first use with progress bar.
+ * Discovers models from the local Ollama instance or ollama.com cloud
+ * and registers them via pi.registerProvider().
+ *
+ * Auth storage: uses pi's shared `~/.pi/agent/auth.json` (not a separate
+ * ollama-config.json).  In command handlers we go through
+ * `ctx.modelRegistry.authStorage` for file-lock safety; at startup the
+ * factory function reads `auth.json` directly (ExtensionAPI doesn't expose
+ * AuthStorage).
+ *
+ * API-key priority:  stored credential  >  OLLAMA_API_KEY env  >  "ollama"
  *
  * Commands:
  * - /ollama-setup: interactive setup wizard for local or cloud Ollama
@@ -11,8 +18,8 @@
  * - /ollama-pull <model>: pull a model with progress bar
  */
 
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
@@ -21,7 +28,7 @@ const DEFAULT_CONTEXT_WINDOW = 32768;
 const DEFAULT_MAX_TOKENS = 32768;
 const CONFIG_DIR = join(homedir(), ".pi", "agent");
 const CACHE_PATH = join(CONFIG_DIR, "ollama-models-cache.json");
-const CONFIG_PATH = join(CONFIG_DIR, "ollama-config.json");
+const AUTH_PATH = join(CONFIG_DIR, "auth.json");
 
 const DEFAULT_LOCAL_URL = "http://localhost:11434";
 const DEFAULT_CLOUD_URL = "https://ollama.com";
@@ -29,46 +36,72 @@ const DEFAULT_CLOUD_URL = "https://ollama.com";
 let localModelNames = new Set<string>();
 let pullingModels = new Set<string>();
 
-// ── config ──
+// ── auth / config resolution ──
 
+/** Minimal config derived from auth.json + env (no separate config file). */
 interface OllamaConfig {
   mode: "local" | "cloud";
   baseUrl: string;
-  apiKey?: string;
+  apiKey: string;
 }
 
-function getDefaultConfig(): OllamaConfig {
-  return { mode: "local", baseUrl: DEFAULT_LOCAL_URL };
-}
-
-function readConfig(): OllamaConfig {
+/**
+ * Read the "ollama" credential from auth.json.
+ * Returns `{ type: "api_key", key: "..." }` or `undefined`.
+ */
+function readOllamaAuthFromJson(): { type: "api_key"; key: string } | undefined {
   try {
-    const data = readFileSync(CONFIG_PATH, "utf-8");
+    const data = readFileSync(AUTH_PATH, "utf-8");
     const parsed = JSON.parse(data);
-    if (parsed && typeof parsed === "object" && parsed.mode && parsed.baseUrl) {
-      return parsed as OllamaConfig;
+    const cred = parsed?.ollama;
+    if (cred?.type === "api_key" && typeof cred.key === "string") {
+      return cred;
     }
   } catch {}
-  return getDefaultConfig();
+  return undefined;
 }
 
-function writeConfig(config: OllamaConfig): void {
-  try {
-    mkdirSync(CONFIG_DIR, { recursive: true });
-    writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), "utf-8");
-  } catch (err) {
-    console.log(`[ollama] config write failed: ${err instanceof Error ? err.message : String(err)}`);
+/**
+ * Resolve the active Ollama config.
+ *
+ * Priority for API key:
+ *   1. stored credential in auth.json (type: "api_key")
+ *   2. OLLAMA_API_KEY environment variable
+ *   3. default "ollama" (works for local / unauthenticated)
+ *
+ * Mode is inferred: if an API key is present and not the default "ollama",
+ * assume cloud mode unless a stored credential explicitly sets local.
+ */
+function resolveConfig(): OllamaConfig {
+  const stored = readOllamaAuthFromJson();
+  const envKey = process.env.OLLAMA_API_KEY;
+
+  const apiKey = stored?.key || envKey || "ollama";
+
+  // If there's a stored credential with mode info, respect it.
+  // Otherwise, a non-default API key implies cloud.
+  if (stored) {
+    // Stored apiKey implies cloud unless we see a `mode` field (future-proof)
+    const mode: "local" | "cloud" = apiKey !== "ollama" ? "cloud" : "local";
+    const baseUrl = mode === "cloud" ? DEFAULT_CLOUD_URL : DEFAULT_LOCAL_URL;
+    return { mode, baseUrl, apiKey };
   }
+
+  if (envKey) {
+    return { mode: "cloud", baseUrl: DEFAULT_CLOUD_URL, apiKey: envKey };
+  }
+
+  return { mode: "local", baseUrl: DEFAULT_LOCAL_URL, apiKey: "ollama" };
 }
 
-let currentConfig: OllamaConfig = readConfig();
+let currentConfig: OllamaConfig = resolveConfig();
 
 function getBaseUrl(): string {
   return currentConfig.baseUrl;
 }
 
 function getApiKey(): string {
-  return currentConfig.apiKey || "ollama";
+  return currentConfig.apiKey;
 }
 
 // ── cache ──
@@ -116,12 +149,17 @@ interface ModelEntry {
   model_info?: Record<string, unknown>;
 }
 
-async function fetchLocalModels(): Promise<ModelEntry[]> {
-  const baseUrl = getBaseUrl();
+function authHeaders(): Record<string, string> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (currentConfig.apiKey) {
+  if (currentConfig.apiKey && currentConfig.apiKey !== "ollama") {
     headers["Authorization"] = `Bearer ${currentConfig.apiKey}`;
   }
+  return headers;
+}
+
+async function fetchLocalModels(): Promise<ModelEntry[]> {
+  const baseUrl = getBaseUrl();
+  const headers = authHeaders();
   try {
     const res = await fetch(`${baseUrl}/api/tags`, { headers });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -137,10 +175,7 @@ async function fetchLocalModels(): Promise<ModelEntry[]> {
 
 async function fetchModelDetails(name: string): Promise<ModelEntry | null> {
   const baseUrl = getBaseUrl();
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (currentConfig.apiKey) {
-    headers["Authorization"] = `Bearer ${currentConfig.apiKey}`;
-  }
+  const headers = authHeaders();
   try {
     const res = await fetch(`${baseUrl}/api/show`, {
       method: "POST",
@@ -178,10 +213,7 @@ async function pullModelWithProgress(modelName: string, ctx?: any): Promise<void
   pullingModels.add(modelName);
 
   const baseUrl = getBaseUrl();
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (currentConfig.apiKey) {
-    headers["Authorization"] = `Bearer ${currentConfig.apiKey}`;
-  }
+  const headers = authHeaders();
 
   try {
     const res = await fetch(`${baseUrl}/api/tags`, { headers });
@@ -352,7 +384,7 @@ async function checkOllamaRunning(): Promise<boolean> {
   }
 }
 
-async function installOllama(pi: ExtensionAPI, ctx: any): Promise<boolean> {
+async function installOllama(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<boolean> {
   ctx.ui.setStatus("ollama-setup", "⬇ Installing Ollama...");
   try {
     const result = await pi.exec("bash", ["-c", "curl -fsSL https://ollama.com/install.sh | sh"], { timeout: 120000 });
@@ -371,7 +403,7 @@ async function installOllama(pi: ExtensionAPI, ctx: any): Promise<boolean> {
   }
 }
 
-async function startOllamaService(pi: ExtensionAPI, ctx: any): Promise<boolean> {
+async function startOllamaService(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<boolean> {
   ctx.ui.setStatus("ollama-setup", "Starting Ollama...");
   try {
     // Start ollama serve in background
@@ -396,7 +428,7 @@ async function startOllamaService(pi: ExtensionAPI, ctx: any): Promise<boolean> 
 }
 
 /** Ensure ollama CLI is installed and running. Returns true if ready. */
-async function ensureOllamaCli(pi: ExtensionAPI, ctx: any): Promise<boolean> {
+async function ensureOllamaCli(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<boolean> {
   const isInstalled = await checkOllamaInstalled(pi);
 
   if (!isInstalled) {
@@ -434,7 +466,9 @@ async function ensureOllamaCli(pi: ExtensionAPI, ctx: any): Promise<boolean> {
   return true;
 }
 
-async function runSetupWizard(pi: ExtensionAPI, ctx: any): Promise<void> {
+async function runSetupWizard(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
+  const authStorage = ctx.modelRegistry.authStorage;
+
   // Step 1: Local or Cloud?
   const mode = await ctx.ui.select(
     "🦙 Ollama Setup — How would you like to use Ollama?",
@@ -451,8 +485,12 @@ async function runSetupWizard(pi: ExtensionAPI, ctx: any): Promise<void> {
     const ready = await ensureOllamaCli(pi, ctx);
     if (!ready) return;
 
-    currentConfig = { mode: "local", baseUrl: DEFAULT_LOCAL_URL };
-    writeConfig(currentConfig);
+    // Clear any stored cloud credential (switching to local)
+    if (authStorage.has("ollama")) {
+      authStorage.remove("ollama");
+    }
+
+    currentConfig = { mode: "local", baseUrl: DEFAULT_LOCAL_URL, apiKey: "ollama" };
     await registerOllamaProvider(pi);
     ctx.ui.notify("✓ Setup complete! Use /models to see available Ollama models.", "info");
     return;
@@ -504,10 +542,10 @@ async function runSetupWizard(pi: ExtensionAPI, ctx: any): Promise<void> {
       const data = await res.json();
       const modelCount = (data.models || []).length;
 
-      // Save config
-      currentConfig = { mode: "cloud", baseUrl, apiKey };
-      writeConfig(currentConfig);
+      // Save via AuthStorage (shared auth.json, file-locked)
+      authStorage.set("ollama", { type: "api_key", key: apiKey });
 
+      currentConfig = { mode: "cloud", baseUrl, apiKey };
       ctx.ui.notify(`✓ Connected to Ollama Cloud! ${modelCount} models available.`, "info");
       await registerOllamaProvider(pi);
     } catch (err) {
@@ -538,8 +576,12 @@ async function runSetupWizard(pi: ExtensionAPI, ctx: any): Promise<void> {
   }
 
   // ollama signin routes cloud models through the local instance
-  currentConfig = { mode: "local", baseUrl: DEFAULT_LOCAL_URL };
-  writeConfig(currentConfig);
+  // Clear any stored API key (switching to local ollama-signin mode)
+  if (authStorage.has("ollama")) {
+    authStorage.remove("ollama");
+  }
+
+  currentConfig = { mode: "local", baseUrl: DEFAULT_LOCAL_URL, apiKey: "ollama" };
   await registerOllamaProvider(pi);
   ctx.ui.notify("✓ Setup complete! Use /models to see available Ollama models.", "info");
 }
@@ -547,8 +589,12 @@ async function runSetupWizard(pi: ExtensionAPI, ctx: any): Promise<void> {
 // ── entry ──
 
 export default function (pi: ExtensionAPI) {
-  // Load config
-  currentConfig = readConfig();
+  // Resolve config from auth.json + env vars (no separate ollama-config.json)
+  currentConfig = resolveConfig();
+
+  if (currentConfig.apiKey !== "ollama") {
+    console.log(`[ollama] API key from ${readOllamaAuthFromJson() ? "auth.json" : "OLLAMA_API_KEY env"}`);
+  }
 
   // Always register commands first, so they're available even on first run
   pi.registerCommand("ollama-setup", {
