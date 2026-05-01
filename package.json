@@ -1,7 +1,7 @@
 {
   "name": "pi-ollama-provider",
-  "version": "1.0.0",
-  "description": "Ollama provider for pi — auto-discovers local models, detects vision/reasoning, auto-pulls on demand with progress bar",
+  "version": "2.0.0",
+  "description": "Ollama provider for pi — native /api/chat streaming, tool calling fix, auto-discovery, cloud support, context safety",
   "keywords": [
     "pi-package"
   ],

@@ -1,22 +1,20 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+/**
+ * Tests for auth.ts — config resolution, auth header generation.
+ */
+
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { writeFileSync, mkdirSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-// ── import from the real module ──
 import {
   resolveConfig,
   readOllamaAuthFromJson,
   authHeaders,
-  isCloudModel,
-  generateModelId,
-  hasVision,
   DEFAULT_LOCAL_URL,
   DEFAULT_CLOUD_URL,
   type OllamaConfig,
-} from "../extensions/pi-ollama-provider/index.js";
-
-// ── test fixtures ──
+} from "../extensions/pi-ollama-provider/auth.js";
 
 let tempDir: string;
 let authPath: string;
@@ -40,9 +38,22 @@ afterEach(() => {
 // ════════════════════════════════════════════════════════════════
 
 describe("readOllamaAuthFromJson", () => {
-  it("reads a valid api_key credential", () => {
+  it("reads a valid api_key credential from 'ollama' key", () => {
     writeFileSync(authPath, JSON.stringify({ ollama: { type: "api_key", key: "my-key-123" } }));
     expect(readOllamaAuthFromJson(authPath)).toEqual({ type: "api_key", key: "my-key-123" });
+  });
+
+  it("reads a valid api_key credential from 'ollama-cloud' key", () => {
+    writeFileSync(authPath, JSON.stringify({ "ollama-cloud": { type: "api_key", key: "cloud-key" } }));
+    expect(readOllamaAuthFromJson(authPath)).toEqual({ type: "api_key", key: "cloud-key" });
+  });
+
+  it("prefers ollama-cloud over ollama", () => {
+    writeFileSync(authPath, JSON.stringify({
+      ollama: { type: "api_key", key: "old-key" },
+      "ollama-cloud": { type: "api_key", key: "new-cloud-key" },
+    }));
+    expect(readOllamaAuthFromJson(authPath)).toEqual({ type: "api_key", key: "new-cloud-key" });
   });
 
   it("returns undefined when no ollama entry", () => {
@@ -160,84 +171,5 @@ describe("authHeaders", () => {
   it("omits Bearer header for empty string key", () => {
     const headers = authHeaders({ mode: "local", baseUrl: DEFAULT_LOCAL_URL, apiKey: "" });
     expect(headers["Authorization"]).toBeUndefined();
-  });
-});
-
-// ════════════════════════════════════════════════════════════════
-// isCloudModel
-// ════════════════════════════════════════════════════════════════
-
-describe("isCloudModel", () => {
-  it("all models are cloud when mode=cloud", () => {
-    expect(isCloudModel("llama3:8b", new Set(["llama3:8b"]), 4e9, "cloud")).toBe(true);
-  });
-
-  it(":cloud tag detected", () => {
-    expect(isCloudModel("kimi-k2.6:cloud", new Set(["kimi-k2.6:cloud"]), 384, "local")).toBe(true);
-  });
-
-  it("-cloud suffix detected", () => {
-    expect(isCloudModel("qwen3.5:397b-cloud", new Set(), 393, "local")).toBe(true);
-    expect(isCloudModel("qwen3-vl:235b-cloud", new Set(), 393, "local")).toBe(true);
-  });
-
-  it("local pulled models not flagged", () => {
-    expect(isCloudModel("llama3:8b", new Set(["llama3:8b"]), 4.7e9, "local")).toBe(false);
-  });
-
-  it("large unpulled models flagged (size fallback)", () => {
-    expect(isCloudModel("huge:200b", new Set(["llama3:8b"]), 200e9, "local")).toBe(true);
-  });
-
-  it("small unpulled local models not flagged", () => {
-    expect(isCloudModel("tiny:1b", new Set(), 1e9, "local")).toBe(false);
-  });
-});
-
-// ════════════════════════════════════════════════════════════════
-// generateModelId
-// ════════════════════════════════════════════════════════════════
-
-describe("generateModelId", () => {
-  it("preserves existing :cloud suffix", () => {
-    expect(generateModelId("kimi-k2.6:cloud", true)).toBe("kimi-k2.6:cloud");
-  });
-
-  it("preserves existing -cloud suffix", () => {
-    expect(generateModelId("qwen3.5:397b-cloud", true)).toBe("qwen3.5:397b-cloud");
-  });
-
-  it("adds -cloud for tagged models in cloud mode", () => {
-    expect(generateModelId("qwen3.5:397b", true)).toBe("qwen3.5:397b-cloud");
-  });
-
-  it("adds :cloud for bare-name models in cloud mode", () => {
-    expect(generateModelId("gemini-3-flash-preview", true)).toBe("gemini-3-flash-preview:cloud");
-  });
-
-  it("does not modify non-cloud models", () => {
-    expect(generateModelId("llama3:8b", false)).toBe("llama3:8b");
-  });
-});
-
-// ════════════════════════════════════════════════════════════════
-// hasVision
-// ════════════════════════════════════════════════════════════════
-
-describe("hasVision", () => {
-  it("detects from capabilities array", () => {
-    expect(hasVision(["vision"], {})).toBe(true);
-    expect(hasVision(["thinking"], {})).toBe(false);
-  });
-
-  it("detects from known architecture", () => {
-    expect(hasVision([], { "general.architecture": "llava-v1.6-34b" })).toBe(true);
-    expect(hasVision([], { "general.architecture": "minicpm-v" })).toBe(true);
-    expect(hasVision([], { "general.architecture": "llama" })).toBe(false);
-  });
-
-  it("detects from clip.has_vision_encoder", () => {
-    expect(hasVision([], { "clip.has_vision_encoder": true })).toBe(true);
-    expect(hasVision([], { "clip.has_vision_encoder": false })).toBe(false);
   });
 });
