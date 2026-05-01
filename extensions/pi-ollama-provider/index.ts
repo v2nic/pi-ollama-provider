@@ -1,9 +1,16 @@
 /**
  * Ollama Auto-Discovery Extension
  *
- * Discovers models from the local Ollama instance and registers them
- * via pi.registerProvider(). Cloud models (:cloud tag) are marked accordingly.
- * Non-installed models are auto-pulled on first use with progress bar.
+ * Discovers models from the local Ollama instance or ollama.com cloud
+ * and registers them via pi.registerProvider().
+ *
+ * Auth storage: uses pi's shared `~/.pi/agent/auth.json` (not a separate
+ * ollama-config.json).  In command handlers we go through
+ * `ctx.modelRegistry.authStorage` for file-lock safety; at startup the
+ * factory function reads `auth.json` directly (ExtensionAPI doesn't expose
+ * AuthStorage).
+ *
+ * API-key priority:  stored credential  >  OLLAMA_API_KEY env  >  "ollama"
  *
  * Commands:
  * - /ollama-setup: interactive setup wizard for local or cloud Ollama
@@ -11,8 +18,8 @@
  * - /ollama-pull <model>: pull a model with progress bar
  */
 
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
@@ -21,54 +28,117 @@ const DEFAULT_CONTEXT_WINDOW = 32768;
 const DEFAULT_MAX_TOKENS = 32768;
 const CONFIG_DIR = join(homedir(), ".pi", "agent");
 const CACHE_PATH = join(CONFIG_DIR, "ollama-models-cache.json");
-const CONFIG_PATH = join(CONFIG_DIR, "ollama-config.json");
+const AUTH_PATH = join(CONFIG_DIR, "auth.json");
 
-const DEFAULT_LOCAL_URL = "http://localhost:11434";
-const DEFAULT_CLOUD_URL = "https://ollama.com";
+export const DEFAULT_LOCAL_URL = "http://localhost:11434";
+export const DEFAULT_CLOUD_URL = "https://ollama.com";
 
 let localModelNames = new Set<string>();
 let pullingModels = new Set<string>();
 
-// ── config ──
+// ── auth / config resolution (exported for testing) ──
 
-interface OllamaConfig {
+/** Minimal config derived from auth.json + env (no separate config file). */
+export interface OllamaConfig {
   mode: "local" | "cloud";
   baseUrl: string;
-  apiKey?: string;
+  apiKey: string;
 }
 
-function getDefaultConfig(): OllamaConfig {
-  return { mode: "local", baseUrl: DEFAULT_LOCAL_URL };
-}
-
-function readConfig(): OllamaConfig {
+/**
+ * Read the "ollama" credential from a JSON auth file.
+ * Accepts an explicit path for testing; defaults to the real auth.json.
+ */
+export function readOllamaAuthFromJson(
+  authPath: string = AUTH_PATH,
+): { type: "api_key"; key: string } | undefined {
   try {
-    const data = readFileSync(CONFIG_PATH, "utf-8");
+    const data = readFileSync(authPath, "utf-8");
     const parsed = JSON.parse(data);
-    if (parsed && typeof parsed === "object" && parsed.mode && parsed.baseUrl) {
-      return parsed as OllamaConfig;
+    const cred = parsed?.ollama;
+    if (cred?.type === "api_key" && typeof cred.key === "string") {
+      return cred;
     }
   } catch {}
-  return getDefaultConfig();
+  return undefined;
 }
 
-function writeConfig(config: OllamaConfig): void {
-  try {
-    mkdirSync(CONFIG_DIR, { recursive: true });
-    writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), "utf-8");
-  } catch (err) {
-    console.log(`[ollama] config write failed: ${err instanceof Error ? err.message : String(err)}`);
+/**
+ * Resolve the active Ollama config.
+ *
+ * Priority for API key:
+ *   1. stored credential in auth.json (type: "api_key")
+ *   2. OLLAMA_API_KEY environment variable
+ *   3. default "ollama" (works for local / unauthenticated)
+ *
+ * Accepts explicit overrides for testing; defaults to real FS + env.
+ */
+export function resolveConfig(options?: {
+  authPath?: string;
+  envKey?: string;
+}): OllamaConfig {
+  const stored = readOllamaAuthFromJson(options?.authPath);
+  const envKey = options?.envKey ?? process.env.OLLAMA_API_KEY;
+
+  const apiKey = stored?.key || envKey || "ollama";
+
+  if (stored) {
+    const mode: "local" | "cloud" = apiKey !== "ollama" ? "cloud" : "local";
+    const baseUrl = mode === "cloud" ? DEFAULT_CLOUD_URL : DEFAULT_LOCAL_URL;
+    return { mode, baseUrl, apiKey };
   }
+
+  if (envKey) {
+    return { mode: "cloud", baseUrl: DEFAULT_CLOUD_URL, apiKey: envKey };
+  }
+
+  return { mode: "local", baseUrl: DEFAULT_LOCAL_URL, apiKey: "ollama" };
 }
 
-let currentConfig: OllamaConfig = readConfig();
+let currentConfig: OllamaConfig = resolveConfig();
 
-function getBaseUrl(): string {
-  return currentConfig.baseUrl;
+/** Return auth headers for Ollama API requests. */
+export function authHeaders(config: OllamaConfig = currentConfig): Record<string, string> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (config.apiKey && config.apiKey !== "ollama") {
+    headers["Authorization"] = `Bearer ${config.apiKey}`;
+  }
+  return headers;
 }
 
-function getApiKey(): string {
-  return currentConfig.apiKey || "ollama";
+// ── capabilities (exported for testing) ──
+
+/** Detect vision support from /api/show details and /api/tags metadata. */
+export function hasVision(
+  capabilities: string[],
+  modelInfo: Record<string, unknown>,
+): boolean {
+  if (capabilities.some((c) => c === "vision")) return true;
+  const arch = String(modelInfo["general.architecture"] ?? "").toLowerCase();
+  if (["llava", "bakllava", "moondream", "llava-next", "minicpm-v", "phi3-v", "mllama"].some((v) => arch.includes(v))) return true;
+  if (modelInfo["clip.has_vision_encoder"] === true) return true;
+  return false;
+}
+
+/** Determine if a model is a cloud model. */
+export function isCloudModel(
+  modelName: string,
+  localModelNames: Set<string>,
+  modelSize: number,
+  configMode: "local" | "cloud",
+): boolean {
+  if (configMode === "cloud") return true;
+  if (modelName.includes(":cloud") || modelName.endsWith("-cloud")) return true;
+  if (!localModelNames.has(modelName) && modelSize > 100_000_000_000) return true;
+  return false;
+}
+
+/** Generate the model ID for a model, adding cloud suffix if needed. */
+export function generateModelId(modelName: string, isCloud: boolean): string {
+  if (isCloud && !modelName.endsWith("-cloud") && !modelName.includes(":cloud")) {
+    return modelName.includes(":") ? `${modelName}-cloud` : `${modelName}:cloud`;
+  }
+  return modelName;
 }
 
 // ── cache ──
@@ -97,9 +167,9 @@ function registerFromCache(pi: ExtensionAPI): boolean {
   if (!cached) return false;
   pi.unregisterProvider(PROVIDER_NAME);
   pi.registerProvider(PROVIDER_NAME, {
-    baseUrl: `${getBaseUrl()}/v1`,
+    baseUrl: `${currentConfig.baseUrl}/v1`,
     api: "openai-completions",
-    apiKey: getApiKey(),
+    apiKey: currentConfig.apiKey,
     compat: { supportsDeveloperRole: false, supportsReasoningEffort: false },
     models: cached,
   });
@@ -117,11 +187,8 @@ interface ModelEntry {
 }
 
 async function fetchLocalModels(): Promise<ModelEntry[]> {
-  const baseUrl = getBaseUrl();
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (currentConfig.apiKey) {
-    headers["Authorization"] = `Bearer ${currentConfig.apiKey}`;
-  }
+  const baseUrl = currentConfig.baseUrl;
+  const headers = authHeaders();
   try {
     const res = await fetch(`${baseUrl}/api/tags`, { headers });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -136,11 +203,8 @@ async function fetchLocalModels(): Promise<ModelEntry[]> {
 }
 
 async function fetchModelDetails(name: string): Promise<ModelEntry | null> {
-  const baseUrl = getBaseUrl();
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (currentConfig.apiKey) {
-    headers["Authorization"] = `Bearer ${currentConfig.apiKey}`;
-  }
+  const baseUrl = currentConfig.baseUrl;
+  const headers = authHeaders();
   try {
     const res = await fetch(`${baseUrl}/api/show`, {
       method: "POST",
@@ -154,20 +218,6 @@ async function fetchModelDetails(name: string): Promise<ModelEntry | null> {
   }
 }
 
-// ── capabilities ──
-
-/** Detect vision support from /api/show details and /api/tags metadata. */
-function hasVision(
-  capabilities: string[],
-  modelInfo: Record<string, unknown>,
-): boolean {
-  if (capabilities.some((c) => c === "vision")) return true;
-  const arch = String(modelInfo["general.architecture"] ?? "").toLowerCase();
-  if (["llava", "bakllava", "moondream", "llava-next", "minicpm-v", "phi3-v", "mllama"].some((v) => arch.includes(v))) return true;
-  if (modelInfo["clip.has_vision_encoder"] === true) return true;
-  return false;
-}
-
 // ── pull ──
 
 async function pullModelWithProgress(modelName: string, ctx?: any): Promise<void> {
@@ -177,11 +227,8 @@ async function pullModelWithProgress(modelName: string, ctx?: any): Promise<void
   }
   pullingModels.add(modelName);
 
-  const baseUrl = getBaseUrl();
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (currentConfig.apiKey) {
-    headers["Authorization"] = `Bearer ${currentConfig.apiKey}`;
-  }
+  const baseUrl = currentConfig.baseUrl;
+  const headers = authHeaders();
 
   try {
     const res = await fetch(`${baseUrl}/api/tags`, { headers });
@@ -302,10 +349,7 @@ async function registerOllamaProvider(pi: ExtensionAPI): Promise<void> {
       maxTokens = 131072;
     }
 
-    // Generate cloud model ID: qwen3.5:397b -> qwen3.5:397b-cloud, gemini-3-flash-preview -> gemini-3-flash-preview:cloud
-    const modelId = isCloud && !model.name.endsWith("-cloud") && !model.name.includes(":cloud")
-      ? (model.name.includes(":") ? `${model.name}-cloud` : `${model.name}:cloud`)
-      : model.name;
+    const modelId = generateModelId(model.name, isCloud);
 
     const isVision = hasVision(capabilities, modelInfo);
 
@@ -322,9 +366,9 @@ async function registerOllamaProvider(pi: ExtensionAPI): Promise<void> {
 
   pi.unregisterProvider(PROVIDER_NAME);
   pi.registerProvider(PROVIDER_NAME, {
-    baseUrl: `${getBaseUrl()}/v1`,
+    baseUrl: `${currentConfig.baseUrl}/v1`,
     api: "openai-completions",
-    apiKey: getApiKey(),
+    apiKey: currentConfig.apiKey,
     compat: { supportsDeveloperRole: false, supportsReasoningEffort: false },
     models: modelConfigs,
   });
@@ -332,110 +376,11 @@ async function registerOllamaProvider(pi: ExtensionAPI): Promise<void> {
   writeModelCache(modelConfigs);
 }
 
-// ── setup wizard ──
+// ── setup wizard (exported for testing) ──
 
-async function checkOllamaInstalled(pi: ExtensionAPI): Promise<boolean> {
-  try {
-    const result = await pi.exec("ollama", ["--version"], { timeout: 5000 });
-    return result.code === 0;
-  } catch {
-    return false;
-  }
-}
+export async function runSetupWizard(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
+  const authStorage = ctx.modelRegistry.authStorage;
 
-async function checkOllamaRunning(): Promise<boolean> {
-  try {
-    const res = await fetch(`${DEFAULT_LOCAL_URL}/api/tags`);
-    return res.ok;
-  } catch {
-    return false;
-  }
-}
-
-async function installOllama(pi: ExtensionAPI, ctx: any): Promise<boolean> {
-  ctx.ui.setStatus("ollama-setup", "⬇ Installing Ollama...");
-  try {
-    const result = await pi.exec("bash", ["-c", "curl -fsSL https://ollama.com/install.sh | sh"], { timeout: 120000 });
-    ctx.ui.setStatus("ollama-setup", undefined);
-    if (result.code === 0) {
-      ctx.ui.notify("✓ Ollama installed successfully!", "info");
-      return true;
-    } else {
-      ctx.ui.notify(`✗ Installation failed: ${result.stderr}`, "error");
-      return false;
-    }
-  } catch (err) {
-    ctx.ui.setStatus("ollama-setup", undefined);
-    ctx.ui.notify(`✗ Installation failed: ${err instanceof Error ? err.message : String(err)}`, "error");
-    return false;
-  }
-}
-
-async function startOllamaService(pi: ExtensionAPI, ctx: any): Promise<boolean> {
-  ctx.ui.setStatus("ollama-setup", "Starting Ollama...");
-  try {
-    // Start ollama serve in background
-    pi.exec("bash", ["-c", "nohup ollama serve > /dev/null 2>&1 &"], { timeout: 5000 }).catch(() => {});
-    // Wait for it to be ready
-    for (let i = 0; i < 10; i++) {
-      await new Promise((r) => setTimeout(r, 1000));
-      if (await checkOllamaRunning()) {
-        ctx.ui.setStatus("ollama-setup", undefined);
-        ctx.ui.notify("✓ Ollama is running!", "info");
-        return true;
-      }
-    }
-    ctx.ui.setStatus("ollama-setup", undefined);
-    ctx.ui.notify("✗ Ollama did not start in time. Try running 'ollama serve' manually.", "error");
-    return false;
-  } catch (err) {
-    ctx.ui.setStatus("ollama-setup", undefined);
-    ctx.ui.notify(`✗ Could not start Ollama: ${err instanceof Error ? err.message : String(err)}`, "error");
-    return false;
-  }
-}
-
-/** Ensure ollama CLI is installed and running. Returns true if ready. */
-async function ensureOllamaCli(pi: ExtensionAPI, ctx: any): Promise<boolean> {
-  const isInstalled = await checkOllamaInstalled(pi);
-
-  if (!isInstalled) {
-    const install = await ctx.ui.confirm(
-      "Ollama not found",
-      "Ollama CLI is not installed on this machine. Install it now?",
-    );
-
-    if (!install) {
-      ctx.ui.notify("Setup cancelled. Install Ollama manually: https://ollama.com/download", "warning");
-      return false;
-    }
-
-    const installed = await installOllama(pi, ctx);
-    if (!installed) return false;
-  }
-
-  // Check if Ollama is running
-  const isRunning = await checkOllamaRunning();
-  if (!isRunning) {
-    const start = await ctx.ui.confirm(
-      "Ollama not running",
-      "Ollama is installed but not running. Start it now?",
-    );
-
-    if (start) {
-      const started = await startOllamaService(pi, ctx);
-      if (!started) return false;
-    } else {
-      ctx.ui.notify("Start Ollama manually with 'ollama serve' before using models.", "warning");
-      return false;
-    }
-  }
-
-  return true;
-}
-
-async function runSetupWizard(pi: ExtensionAPI, ctx: any): Promise<void> {
-  // Step 1: Local or Cloud?
   const mode = await ctx.ui.select(
     "🦙 Ollama Setup — How would you like to use Ollama?",
     [
@@ -444,21 +389,22 @@ async function runSetupWizard(pi: ExtensionAPI, ctx: any): Promise<void> {
     ],
   );
 
-  if (!mode) return; // cancelled
+  if (!mode) return;
 
   if (mode.startsWith("Local")) {
-    // ── Local setup: install/start ollama, discover models ──
     const ready = await ensureOllamaCli(pi, ctx);
     if (!ready) return;
 
-    currentConfig = { mode: "local", baseUrl: DEFAULT_LOCAL_URL };
-    writeConfig(currentConfig);
+    if (authStorage.has("ollama")) {
+      authStorage.remove("ollama");
+    }
+
+    currentConfig = { mode: "local", baseUrl: DEFAULT_LOCAL_URL, apiKey: "ollama" };
     await registerOllamaProvider(pi);
     ctx.ui.notify("✓ Setup complete! Use /models to see available Ollama models.", "info");
     return;
   }
 
-  // ── Cloud setup ──
   const authMethod = await ctx.ui.select(
     "🦙 Cloud Authentication — How would you like to authenticate?",
     [
@@ -467,10 +413,9 @@ async function runSetupWizard(pi: ExtensionAPI, ctx: any): Promise<void> {
     ],
   );
 
-  if (!authMethod) return; // cancelled
+  if (!authMethod) return;
 
   if (authMethod.startsWith("API key")) {
-    // ── Direct API key access to ollama.com (no local CLI needed) ──
     const apiKey = await ctx.ui.input(
       "Enter your Ollama API key (from ollama.com/settings/keys):",
       "",
@@ -483,7 +428,6 @@ async function runSetupWizard(pi: ExtensionAPI, ctx: any): Promise<void> {
 
     const baseUrl = DEFAULT_CLOUD_URL;
 
-    // Test the connection
     ctx.ui.setStatus("ollama-setup", "Testing cloud connection...");
     try {
       const res = await fetch(`${baseUrl}/api/tags`, {
@@ -504,10 +448,9 @@ async function runSetupWizard(pi: ExtensionAPI, ctx: any): Promise<void> {
       const data = await res.json();
       const modelCount = (data.models || []).length;
 
-      // Save config
-      currentConfig = { mode: "cloud", baseUrl, apiKey };
-      writeConfig(currentConfig);
+      authStorage.set("ollama", { type: "api_key", key: apiKey });
 
+      currentConfig = { mode: "cloud", baseUrl, apiKey };
       ctx.ui.notify(`✓ Connected to Ollama Cloud! ${modelCount} models available.`, "info");
       await registerOllamaProvider(pi);
     } catch (err) {
@@ -517,7 +460,6 @@ async function runSetupWizard(pi: ExtensionAPI, ctx: any): Promise<void> {
     return;
   }
 
-  // ── Browser login: needs ollama CLI installed + 'ollama signin' ──
   const ready = await ensureOllamaCli(pi, ctx);
   if (!ready) return;
 
@@ -537,20 +479,123 @@ async function runSetupWizard(pi: ExtensionAPI, ctx: any): Promise<void> {
     return;
   }
 
-  // ollama signin routes cloud models through the local instance
-  currentConfig = { mode: "local", baseUrl: DEFAULT_LOCAL_URL };
-  writeConfig(currentConfig);
+  if (authStorage.has("ollama")) {
+    authStorage.remove("ollama");
+  }
+
+  currentConfig = { mode: "local", baseUrl: DEFAULT_LOCAL_URL, apiKey: "ollama" };
   await registerOllamaProvider(pi);
   ctx.ui.notify("✓ Setup complete! Use /models to see available Ollama models.", "info");
+}
+
+// ── setup helpers ──
+
+async function checkOllamaInstalled(pi: ExtensionAPI): Promise<boolean> {
+  try {
+    const result = await pi.exec("ollama", ["--version"], { timeout: 5000 });
+    return result.code === 0;
+  } catch {
+    return false;
+  }
+}
+
+async function checkOllamaRunning(): Promise<boolean> {
+  try {
+    const res = await fetch(`${DEFAULT_LOCAL_URL}/api/tags`);
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function installOllama(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<boolean> {
+  ctx.ui.setStatus("ollama-setup", "⬇ Installing Ollama...");
+  try {
+    const result = await pi.exec("bash", ["-c", "curl -fsSL https://ollama.com/install.sh | sh"], { timeout: 120000 });
+    ctx.ui.setStatus("ollama-setup", undefined);
+    if (result.code === 0) {
+      ctx.ui.notify("✓ Ollama installed successfully!", "info");
+      return true;
+    } else {
+      ctx.ui.notify(`✗ Installation failed: ${result.stderr}`, "error");
+      return false;
+    }
+  } catch (err) {
+    ctx.ui.setStatus("ollama-setup", undefined);
+    ctx.ui.notify(`✗ Installation failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+    return false;
+  }
+}
+
+async function startOllamaService(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<boolean> {
+  ctx.ui.setStatus("ollama-setup", "Starting Ollama...");
+  try {
+    pi.exec("bash", ["-c", "nohup ollama serve > /dev/null 2>&1 &"], { timeout: 5000 }).catch(() => {});
+    for (let i = 0; i < 10; i++) {
+      await new Promise((r) => setTimeout(r, 1000));
+      if (await checkOllamaRunning()) {
+        ctx.ui.setStatus("ollama-setup", undefined);
+        ctx.ui.notify("✓ Ollama is running!", "info");
+        return true;
+      }
+    }
+    ctx.ui.setStatus("ollama-setup", undefined);
+    ctx.ui.notify("✗ Ollama did not start in time. Try running 'ollama serve' manually.", "error");
+    return false;
+  } catch (err) {
+    ctx.ui.setStatus("ollama-setup", undefined);
+    ctx.ui.notify(`✗ Could not start Ollama: ${err instanceof Error ? err.message : String(err)}`, "error");
+    return false;
+  }
+}
+
+async function ensureOllamaCli(pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<boolean> {
+  const isInstalled = await checkOllamaInstalled(pi);
+
+  if (!isInstalled) {
+    const install = await ctx.ui.confirm(
+      "Ollama not found",
+      "Ollama CLI is not installed on this machine. Install it now?",
+    );
+
+    if (!install) {
+      ctx.ui.notify("Setup cancelled. Install Ollama manually: https://ollama.com/download", "warning");
+      return false;
+    }
+
+    const installed = await installOllama(pi, ctx);
+    if (!installed) return false;
+  }
+
+  const isRunning = await checkOllamaRunning();
+  if (!isRunning) {
+    const start = await ctx.ui.confirm(
+      "Ollama not running",
+      "Ollama is installed but not running. Start it now?",
+    );
+
+    if (start) {
+      const started = await startOllamaService(pi, ctx);
+      if (!started) return false;
+    } else {
+      ctx.ui.notify("Start Ollama manually with 'ollama serve' before using models.", "warning");
+      return false;
+    }
+  }
+
+  return true;
 }
 
 // ── entry ──
 
 export default function (pi: ExtensionAPI) {
-  // Load config
-  currentConfig = readConfig();
+  // Resolve config from auth.json + env vars (no separate ollama-config.json)
+  currentConfig = resolveConfig();
 
-  // Always register commands first, so they're available even on first run
+  if (currentConfig.apiKey !== "ollama") {
+    console.log(`[ollama] API key from ${readOllamaAuthFromJson() ? "auth.json" : "OLLAMA_API_KEY env"}`);
+  }
+
   pi.registerCommand("ollama-setup", {
     description: "Interactive setup wizard for Ollama (local or cloud)",
     handler: async (_args, ctx) => {
@@ -593,12 +638,10 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  // Register from cache synchronously (instant), then refresh from Ollama.
   const hasCache = registerFromCache(pi);
 
   const ready = registerOllamaProvider(pi);
   if (!hasCache) {
-    // No cache — block so models are available before session starts
     return ready;
   }
 }

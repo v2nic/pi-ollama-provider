@@ -54,7 +54,17 @@ The wizard guides you through:
    - Asks for your ollama.com API key
    - Configures the extension to connect directly (no local Ollama required)
 
-Configuration is saved to `~/.pi/agent/ollama-config.json`.
+Configuration is saved to `~/.pi/agent/auth.json` under the `ollama` key (shared with all pi providers).
+You can also set the `OLLAMA_API_KEY` environment variable — it takes effect automatically
+without running the wizard.
+
+### Environment variable
+
+Set `OLLAMA_API_KEY` to connect to ollama.com without the wizard:
+
+```bash
+export OLLAMA_API_KEY=your-key-here
+```
 
 ### Manual authentication (optional)
 
@@ -94,7 +104,7 @@ Then on subsequent runs, it will use the cache and print:
 | | **pi-ollama-provider** | **pi-ollama** |
 |---|---|---|
 | Model source | Local `/api/tags` only | Local `/api/tags` + cloud API via `ollama-js` |
-| Cloud config | None — uses whatever Ollama already has | Settings files + env vars (`OLLAMA_HOST`, `OLLAMA_API_KEY`) |
+| Cloud config | Shared `auth.json` + env var (`OLLAMA_API_KEY`) | Settings files + env vars (`OLLAMA_HOST`, `OLLAMA_API_KEY`) |
 | Cloud models | `:cloud` tag detected from local Ollama | Separate `ollama-cloud` provider with API key |
 | Vision detection | ✅ capabilities + architecture + CLIP flag | ✅ capabilities + architecture + CLIP flag |
 | Reasoning detection | `capabilities: ["thinking"]` from `/api/show` | Heuristic from model name (`r1`, `deepseek`, etc.) |
