@@ -16,16 +16,18 @@ import {
   isCloudModel,
   generateModelId,
   getOllamaHost,
+  assembleModelsFromCache,
   FALLBACK_LOCAL_MODELS,
   FALLBACK_CLOUD_MODELS,
   type OllamaModelConfig,
+  type OllamaModelCache,
+  type OllamaTagsModel,
 } from "../extensions/pi-ollama-provider/index.js";
 
 import {
   readModelCache,
   writeModelCache,
   CACHE_PATH,
-  type OllamaModelCacheV2,
 } from "../extensions/pi-ollama-provider/discovery.js";
 
 // ── fallback model structure validation ──
@@ -100,96 +102,63 @@ describe("FALLBACK_CLOUD_MODELS", () => {
 });
 
 // ════════════════════════════════════════════════════════════════
-// Cache v2 format
+// Cache v2 format (raw API responses)
 // ════════════════════════════════════════════════════════════════
 
 describe("readModelCache / writeModelCache", () => {
-  let originalCachePath: string;
-  let tempCachePath: string;
-
   beforeEach(() => {
-    // Mock CACHE_PATH by temporarily pointing to a temp file
-    originalCachePath = (globalThis as any).__CACHE_PATH__;
-    tempCachePath = join(tmpdir(), `pi-ollama-cache-test-${Date.now()}`);
-    mkdirSync(join(tempCachePath, ".."), { recursive: true });
-  });
-
-  afterEach(() => {
-    (globalThis as any).__CACHE_PATH__ = originalCachePath;
-    if (existsSync(tempCachePath)) {
-      rmSync(tempCachePath, { recursive: true, force: true });
-    }
-  });
-
-  it("writeModelCache creates v2 format with version and timestamp", () => {
-    const models: OllamaModelConfig[] = [
-      {
-        id: "llama3.1:8b",
-        name: "llama3.1:8b",
-        reasoning: false,
-        input: ["text"],
-        contextWindow: 131072,
-        maxTokens: 32768,
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        toolSupport: true,
-        isCloud: false,
-        ollamaName: "llama3.1:8b",
-      },
-    ];
-
-    writeModelCache(models);
-
-    const cached = readModelCache();
-    expect(cached).not.toBeNull();
-    expect(cached!.length).toBe(1);
-    expect(cached![0].id).toBe("llama3.1:8b");
-
-    // Clean up — find the actual cache path by reading the written file
+    // Clean up any existing cache
     try { rmSync(CACHE_PATH, { force: true }); } catch {}
   });
 
+  afterEach(() => {
+    try { rmSync(CACHE_PATH, { force: true }); } catch {}
+  });
+
+  it("writeModelCache creates v2 format with tagsModels and showResponses", () => {
+    const tagsModels: OllamaTagsModel[] = [
+      {
+        name: "llama3.1:8b",
+        model: "llama3.1:8b",
+        modified_at: "2025-01-01T00:00:00Z",
+        size: 4661224676,
+        digest: "abc123",
+        details: { family: "llama3.1", capabilities: ["tools"] },
+      },
+    ];
+
+    const cache: OllamaModelCache = {
+      version: 2,
+      timestamp: Date.now(),
+      tagsModels,
+      showResponses: {
+        "llama3.1:8b": {
+          details: { family: "llama3.1", capabilities: ["tools"] },
+          model_info: { "llama.context_length": 131072 },
+        },
+      },
+      mode: "local",
+    };
+
+    writeModelCache(cache);
+
+    const readBack = readModelCache();
+    expect(readBack).not.toBeNull();
+    expect(readBack!.version).toBe(2);
+    expect(readBack!.tagsModels.length).toBe(1);
+    expect(readBack!.tagsModels[0].name).toBe("llama3.1:8b");
+    expect(readBack!.mode).toBe("local");
+  });
+
   it("readModelCache returns null when cache file doesn't exist", () => {
-    // readModelCache uses hardcoded CACHE_PATH, so we test by deleting any existing cache
     try { rmSync(CACHE_PATH, { force: true }); } catch {}
     const result = readModelCache();
     expect(result).toBeNull();
   });
 
-  it("readModelCache handles v2 format with version field", () => {
-    // Write v2 format directly
-    const v2Cache: OllamaModelCacheV2 = {
-      version: 2,
-      timestamp: Date.now(),
-      models: [
-        {
-          id: "qwen3:32b",
-          name: "qwen3:32b",
-          reasoning: true,
-          input: ["text"],
-          contextWindow: 131072,
-          maxTokens: 32768,
-          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-          toolSupport: true,
-          isCloud: false,
-          ollamaName: "qwen3:32b",
-        },
-      ],
-    };
-
-    mkdirSync(join(CACHE_PATH, ".."), { recursive: true });
-    writeFileSync(CACHE_PATH, JSON.stringify(v2Cache, null, 2));
-
-    const cached = readModelCache();
-    expect(cached).not.toBeNull();
-    expect(cached!.length).toBe(1);
-    expect(cached![0].id).toBe("qwen3:32b");
-
-    // Clean up
-    rmSync(CACHE_PATH, { force: true });
-  });
-
-  it("readModelCache migrates v1 (plain array) format", () => {
-    const v1Cache: OllamaModelConfig[] = [
+  it("readModelCache discards v1 (plain array) format", () => {
+    // v1 format is a plain array of processed configs
+    const v1Cache = [
       {
         id: "llama3.1:8b",
         name: "llama3.1:8b",
@@ -208,42 +177,66 @@ describe("readModelCache / writeModelCache", () => {
     writeFileSync(CACHE_PATH, JSON.stringify(v1Cache, null, 2));
 
     const cached = readModelCache();
-    expect(cached).not.toBeNull();
-    expect(cached!.length).toBe(1);
-    expect(cached![0].id).toBe("llama3.1:8b");
-
-    // Clean up
-    rmSync(CACHE_PATH, { force: true });
+    expect(cached).toBeNull(); // v1 is discarded, not migrated
   });
 
-  it("writeModelCache produces v2 format readable as v2", () => {
-    const models: OllamaModelConfig[] = [
-      {
-        id: "test:model",
-        name: "test:model",
-        reasoning: false,
-        input: ["text"],
-        contextWindow: 8192,
-        maxTokens: 2048,
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        toolSupport: false,
-        isCloud: false,
-        ollamaName: "test:model",
-      },
-    ];
+  it("readModelCache discards unknown version", () => {
+    const unknownCache = { version: 99, timestamp: Date.now(), tagsModels: [], showResponses: {} };
+    mkdirSync(join(CACHE_PATH, ".."), { recursive: true });
+    writeFileSync(CACHE_PATH, JSON.stringify(unknownCache, null, 2));
 
-    writeModelCache(models);
+    const cached = readModelCache();
+    expect(cached).toBeNull();
+  });
 
-    // Read the raw file and verify v2 format
+  it("writeModelCache produces v2 format with version and timestamp", () => {
+    const cache: OllamaModelCache = {
+      version: 2,
+      timestamp: Date.now(),
+      tagsModels: [],
+      showResponses: {},
+      mode: "local",
+    };
+
+    writeModelCache(cache);
+
     mkdirSync(join(CACHE_PATH, ".."), { recursive: true });
     const raw = JSON.parse(readFileSync(CACHE_PATH, "utf-8"));
     expect(raw.version).toBe(2);
     expect(raw.timestamp).toBeTypeOf("number");
-    expect(raw.models).toHaveLength(1);
-    expect(raw.models[0].id).toBe("test:model");
+    expect(raw.mode).toBe("local");
 
-    // Clean up
     rmSync(CACHE_PATH, { force: true });
+  });
+
+  it("assembleModelsFromCache produces valid model configs", () => {
+    const cache: OllamaModelCache = {
+      version: 2,
+      timestamp: Date.now(),
+      tagsModels: [
+        {
+          name: "llama3.1:8b",
+          model: "llama3.1:8b",
+          modified_at: "2025-01-01T00:00:00Z",
+          size: 4661224676,
+          digest: "abc123",
+          details: { family: "llama3.1", capabilities: ["tools"] },
+        },
+      ],
+      showResponses: {
+        "llama3.1:8b": {
+          details: { family: "llama3.1", capabilities: ["tools"] },
+          model_info: { "llama.context_length": 131072 },
+        },
+      },
+      mode: "local",
+    };
+
+    const configs = assembleModelsFromCache(cache, "local");
+    expect(configs.length).toBe(1);
+    expect(configs[0].id).toBe("llama3.1:8b");
+    expect(configs[0].toolSupport).toBe(true);
+    expect(configs[0].contextWindow).toBe(131072);
   });
 });
 
