@@ -268,26 +268,159 @@ export function generateModelId(modelName: string, isCloud: boolean): string {
 
 // ── cache ──
 
-export function readModelCache(): OllamaModelConfig[] | null {
+/** Cache format version — bump when schema changes to invalidate old caches. */
+const CACHE_VERSION = 2;
+
+/**
+ * On-disk cache format v2: raw /api/tags and /api/show responses.
+ *
+ * Storing raw API data (instead of processed configs) means:
+ * - Cache can be re-processed without re-fetching (e.g., if capability inference changes)
+ * - Raw data is better for debugging — inspect actual API responses
+ * - Forward compatible — new fields from newer Ollama versions are preserved
+ * - Backward compatible — v1 (flat array) caches are detected and gracefully discarded
+ */
+export interface OllamaModelCache {
+  version: number;
+  timestamp: number;
+  /** Raw /api/tags response models */
+  tagsModels: OllamaTagsModel[];
+  /** Raw /api/show responses keyed by model name */
+  showResponses: Record<string, OllamaShowResponse | null>;
+  /** Config mode at time of caching ("local" or "cloud") */
+  mode: "local" | "cloud";
+}
+
+/**
+ * Read the raw cache from disk.
+ * Returns null if cache doesn't exist, is empty, or is an old v1 format.
+ */
+export function readModelCache(): OllamaModelCache | null {
   try {
     if (!existsSync(CACHE_PATH)) return null;
     const data = readFileSync(CACHE_PATH, "utf-8");
     const parsed = JSON.parse(data);
-    return Array.isArray(parsed) && parsed.length > 0 ? parsed : null;
+
+    // v1 format: flat array of OllamaModelConfig — discard gracefully
+    if (Array.isArray(parsed)) {
+      console.log("[ollama] discarding v1 cache (upgrading to v2 raw format)");
+      return null;
+    }
+
+    // v2 format: versioned object
+    if (parsed.version === CACHE_VERSION && parsed.tagsModels && parsed.showResponses) {
+      return parsed as OllamaModelCache;
+    }
+
+    // Unknown format — discard
+    console.log(`[ollama] discarding unknown cache format (version=${parsed.version})`);
+    return null;
   } catch {
     return null;
   }
 }
 
-export function writeModelCache(models: OllamaModelConfig[]): void {
+/**
+ * Write the raw cache to disk.
+ */
+export function writeModelCache(cache: OllamaModelCache): void {
   try {
     mkdirSync(CONFIG_DIR, { recursive: true });
-    writeFileSync(CACHE_PATH, JSON.stringify(models, null, 2), "utf-8");
+    writeFileSync(
+      CACHE_PATH,
+      JSON.stringify(
+        {
+          version: CACHE_VERSION,
+          timestamp: Date.now(),
+          tagsModels: cache.tagsModels,
+          showResponses: cache.showResponses,
+          mode: cache.mode,
+        },
+        null,
+        2,
+      ),
+      "utf-8",
+    );
   } catch (err) {
     console.log(
       `[ollama] cache write failed: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
+}
+
+/**
+ * Assemble model configs from cached raw API data.
+ * This is the same logic as discoverModels() but operates on cached data
+ * instead of fresh API responses, so it can be re-run without re-fetching.
+ */
+export function assembleModelsFromCache(
+  cache: OllamaModelCache,
+  configMode: "local" | "cloud",
+): OllamaModelConfig[] {
+  const localModelNames = new Set(cache.tagsModels.map((m) => m.name));
+
+  return cache.tagsModels.map((model) => {
+    const details = cache.showResponses[model.name];
+    const capabilities: string[] =
+      details?.capabilities ||
+      details?.details?.capabilities ||
+      model.details?.capabilities ||
+      [];
+    const modelInfo: Record<string, unknown> = {
+      ...(details?.model_info || {}),
+    };
+
+    const family = details?.details?.family || model.details?.family;
+    const families = details?.details?.families || model.details?.families;
+    const parameterSize =
+      details?.details?.parameter_size || model.details?.parameter_size;
+    const quantizationLevel =
+      details?.details?.quantization_level || model.details?.quantization_level;
+
+    // Context window from /api/show
+    let contextWindow = DEFAULT_CONTEXT_WINDOW;
+    let maxTokens = DEFAULT_MAX_TOKENS;
+    const ctxLength = extractContextLength(modelInfo);
+    if (ctxLength !== null) {
+      contextWindow = ctxLength;
+      maxTokens = Math.min(Math.round(ctxLength * 0.25), 131072);
+    }
+
+    // Cloud model detection
+    const isCloud = isCloudModel(model.name, localModelNames, model.size, configMode);
+    if (isCloud && ctxLength === null) {
+      contextWindow = CLOUD_DEFAULT_CONTEXT;
+      maxTokens = CLOUD_DEFAULT_MAX_TOKENS;
+    }
+
+    const modelId = generateModelId(model.name, isCloud);
+
+    // Capability inference
+    const vision = hasVision(capabilities, modelInfo, family);
+    const toolSupport = hasToolSupport(capabilities, modelInfo, family, model.name);
+    const reasoning = hasReasoning(capabilities, model.name);
+
+    return {
+      id: modelId,
+      name: isCloud ? `${model.name} (cloud)` : model.name,
+      reasoning,
+      input: vision ? (["text", "image"] as const) : (["text"] as const),
+      contextWindow,
+      maxTokens,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      toolSupport,
+      isCloud,
+      ollamaName: model.name,
+      rawDetails: {
+        capabilities,
+        modelInfo,
+        parameterSize,
+        quantizationLevel,
+        family,
+        families,
+      },
+    };
+  });
 }
 
 // ── API fetching ──
@@ -383,6 +516,8 @@ export interface DiscoveryResult {
   localModels: OllamaModelConfig[];
   localModelNames: Set<string>;
   loadedModels: string[];
+  /** Raw API data for caching (re-processable without re-fetching) */
+  rawCacheData: OllamaModelCache;
 }
 
 /**
@@ -399,7 +534,7 @@ export async function discoverModels(
 ): Promise<DiscoveryResult> {
   const tagsModels = await fetchLocalModels(baseUrl, apiKey);
   if (tagsModels.length === 0) {
-    return { localModels: [], localModelNames: new Set(), loadedModels: [] };
+    return { localModels: [], localModelNames: new Set(), loadedModels: [], rawCacheData: { version: 2, timestamp: Date.now(), tagsModels: [], showResponses: {}, mode: configMode } };
   }
 
   const discoveredNames = new Set(tagsModels.map((m) => m.name));
@@ -488,5 +623,12 @@ export async function discoverModels(
     localModels: modelConfigs,
     localModelNames: names,
     loadedModels,
+    rawCacheData: {
+      version: 2,
+      timestamp: Date.now(),
+      tagsModels: tagsModels,
+      showResponses: Object.fromEntries(detailResults),
+      mode: configMode,
+    },
   };
 }

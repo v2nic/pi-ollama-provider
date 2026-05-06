@@ -28,7 +28,7 @@ import type {
 } from "@mariozechner/pi-coding-agent";
 
 import { resolveConfig, readOllamaAuthFromJson, type OllamaConfig, DEFAULT_LOCAL_URL, DEFAULT_CLOUD_URL } from "./auth.js";
-import { getOllamaHost, discoverModels, readModelCache, writeModelCache, type OllamaModelConfig } from "./discovery.js";
+import { getOllamaHost, discoverModels, readModelCache, writeModelCache, assembleModelsFromCache, type OllamaModelConfig, type OllamaModelCache } from "./discovery.js";
 import { registerCloudProvider, registerCloudTools } from "./cloud.js";
 import { streamNativeChat, convertMessages, convertTools, parseNDJSON, isGhostTokenStream, isOllamaContextOverflow, type OllamaOptions, type OllamaChatChunk } from "./native-stream.js";
 import { isOllamaContextOverflow as isOverflowFromSafety, calculateNumCtx, getDefaultKeepAlive } from "./context-safety.js";
@@ -37,7 +37,7 @@ import { readSettings, writeSettings, handleStatusCommand, handleInfoCommand, ha
 // Re-export for testing
 export { resolveConfig, readOllamaAuthFromJson, DEFAULT_LOCAL_URL, DEFAULT_CLOUD_URL } from "./auth.js";
 export type { OllamaConfig } from "./auth.js";
-export { hasVision, hasToolSupport, hasReasoning, isCloudModel, generateModelId, extractContextLength, getOllamaHost } from "./discovery.js";
+export { hasVision, hasToolSupport, hasReasoning, isCloudModel, generateModelId, extractContextLength, getOllamaHost, assembleModelsFromCache, type OllamaModelCache } from "./discovery.js";
 export { parseNDJSON, convertMessages, convertTools, isGhostTokenStream, isOllamaContextOverflow } from "./native-stream.js";
 export { isOllamaContextOverflow as isOllamaOverflowFromSafety, calculateNumCtx, getDefaultKeepAlive } from "./context-safety.js";
 export { readSettings, writeSettings, type OllamaSettings } from "./commands.js";
@@ -171,8 +171,8 @@ async function registerLocalProvider(pi: ExtensionAPI, settings: OllamaSettings)
     });
   }
 
-  // Update cache for instant next startup
-  writeModelCache(modelConfigs);
+  // Update cache for instant next startup (raw API data)
+  writeModelCache(result.rawCacheData);
 
   console.log(
     `[ollama] ${modelConfigs.length} models registered (streaming: ${settings.streamingMode || "native"})`,
@@ -185,10 +185,16 @@ async function registerLocalProvider(pi: ExtensionAPI, settings: OllamaSettings)
  */
 function registerFromCache(pi: ExtensionAPI): boolean {
   const cached = readModelCache();
-  if (!cached || cached.length === 0) return false;
+  if (!cached) return false;
 
   const settings = readSettings();
-  const piModels = cached.map((m) => ({
+  // Re-assemble model configs from raw cached API data
+  // This means if capability inference logic changes, we can
+  // re-process the same cached data without re-fetching.
+  const modelConfigs = assembleModelsFromCache(cached, currentConfig.mode);
+  if (modelConfigs.length === 0) return false;
+
+  const piModels = modelConfigs.map((m) => ({
     id: m.id,
     name: m.name,
     reasoning: m.reasoning,
@@ -231,7 +237,7 @@ function registerFromCache(pi: ExtensionAPI): boolean {
     });
   }
 
-  console.log(`[ollama] ${cached.length} models from cache`);
+  console.log(`[ollama] ${modelConfigs.length} models from cache (v${cached.version}, ${Math.round((Date.now() - cached.timestamp) / 3600000)}h old)`);
   return true;
 }
 
