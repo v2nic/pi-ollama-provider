@@ -26,7 +26,7 @@
     "@sinclair/typebox": "*"
   },
   "devDependencies": {
-    "@mariozechner/pi-coding-agent": "0.70.5",
+    "@mariozechner/pi-coding-agent": "0.73.0",
     "@mariozechner/pi-tui": "0.70.6",
     "@sinclair/typebox": "^0.34.33",
     "vitest": "^4.1.5"
