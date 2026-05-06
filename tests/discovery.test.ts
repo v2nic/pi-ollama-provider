@@ -1,6 +1,6 @@
 /**
  * Tests for discovery.ts — model discovery, capability inference, cache,
- * fallback models, and OLLAMA_API_BASE.
+ * cache, and OLLAMA_API_BASE.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
@@ -17,8 +17,6 @@ import {
   generateModelId,
   getOllamaHost,
   assembleModelsFromCache,
-  FALLBACK_LOCAL_MODELS,
-  FALLBACK_CLOUD_MODELS,
   type OllamaModelConfig,
   type OllamaModelCache,
   type OllamaTagsModel,
@@ -29,77 +27,6 @@ import {
   writeModelCache,
   CACHE_PATH,
 } from "../extensions/pi-ollama-provider/discovery.js";
-
-// ── fallback model structure validation ──
-
-describe("FALLBACK_LOCAL_MODELS", () => {
-  it("has at least 3 models", () => {
-    expect(FALLBACK_LOCAL_MODELS.length).toBeGreaterThanOrEqual(3);
-  });
-
-  it("all local models have required fields", () => {
-    for (const m of FALLBACK_LOCAL_MODELS) {
-      expect(m.id).toBeTruthy();
-      expect(m.name).toBeTruthy();
-      expect(m.contextWindow).toBeGreaterThan(0);
-      expect(m.maxTokens).toBeGreaterThan(0);
-      expect(m.isCloud).toBe(false);
-      expect(m.ollamaName).toBeTruthy();
-    }
-  });
-
-  it("all local models have isCloud=false", () => {
-    for (const m of FALLBACK_LOCAL_MODELS) {
-      expect(m.isCloud).toBe(false);
-    }
-  });
-
-  it("at least one local model supports tools", () => {
-    expect(FALLBACK_LOCAL_MODELS.some(m => m.toolSupport)).toBe(true);
-  });
-
-  it("local model IDs do not have :cloud suffix", () => {
-    for (const m of FALLBACK_LOCAL_MODELS) {
-      expect(m.id).not.toContain(":cloud");
-      expect(m.id).not.toMatch(/-cloud$/);
-    }
-  });
-});
-
-describe("FALLBACK_CLOUD_MODELS", () => {
-  it("has at least 2 models", () => {
-    expect(FALLBACK_CLOUD_MODELS.length).toBeGreaterThanOrEqual(2);
-  });
-
-  it("all cloud models have required fields", () => {
-    for (const m of FALLBACK_CLOUD_MODELS) {
-      expect(m.id).toBeTruthy();
-      expect(m.name).toBeTruthy();
-      expect(m.contextWindow).toBeGreaterThan(0);
-      expect(m.maxTokens).toBeGreaterThan(0);
-      expect(m.isCloud).toBe(true);
-      expect(m.ollamaName).toBeTruthy();
-    }
-  });
-
-  it("all cloud models are marked as cloud", () => {
-    for (const m of FALLBACK_CLOUD_MODELS) {
-      expect(m.isCloud).toBe(true);
-    }
-  });
-
-  it("all cloud models support tools (required for coding agent)", () => {
-    for (const m of FALLBACK_CLOUD_MODELS) {
-      expect(m.toolSupport).toBe(true);
-    }
-  });
-
-  it("cloud model IDs have :cloud or -cloud suffix", () => {
-    for (const m of FALLBACK_CLOUD_MODELS) {
-      expect(m.id).toMatch(/(:cloud|-cloud)$/);
-    }
-  });
-});
 
 // ════════════════════════════════════════════════════════════════
 // Cache v2 format (raw API responses)

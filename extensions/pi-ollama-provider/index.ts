@@ -12,7 +12,6 @@
  * - Ollama context overflow detection
  * - Separate ollama and ollama-cloud providers
  * - Two-tier model discovery (cache + API)
- * - Cold-start fallback models when cache is empty and server unreachable
  * - Tool capability detection
  * - /ollama-status, /ollama-info, /ollama-pull commands
  * - Sampling parameter settings (temperature, top_p, etc.)
@@ -50,8 +49,6 @@ import {
   readModelCache,
   writeModelCache,
   assembleModelsFromCache,
-  FALLBACK_LOCAL_MODELS,
-  FALLBACK_CLOUD_MODELS,
   type OllamaModelConfig,
   type OllamaModelCache,
 } from "./discovery.js";
@@ -63,7 +60,7 @@ import { readSettings, writeSettings, handleStatusCommand, handleInfoCommand, ha
 // Re-export for testing
 export { resolveConfig, resolveConfigAsync, readOllamaAuthFromJson, describeAuthSource, DEFAULT_LOCAL_URL, DEFAULT_CLOUD_URL } from "./auth.js";
 export type { OllamaConfig } from "./auth.js";
-export { hasVision, hasToolSupport, hasReasoning, isCloudModel, generateModelId, extractContextLength, getOllamaHost, assembleModelsFromCache, FALLBACK_LOCAL_MODELS, FALLBACK_CLOUD_MODELS, type OllamaModelCache } from "./discovery.js";
+export { hasVision, hasToolSupport, hasReasoning, isCloudModel, generateModelId, extractContextLength, getOllamaHost, assembleModelsFromCache, type OllamaModelCache } from "./discovery.js";
 export { parseNDJSON, convertMessages, convertTools, isGhostTokenStream, isOllamaContextOverflow } from "./native-stream.js";
 export { isOllamaContextOverflow as isOllamaOverflowFromSafety, calculateNumCtx, getDefaultKeepAlive } from "./context-safety.js";
 export { readSettings, writeSettings, validateSettings, type SettingsValidationIssue, type OllamaSettings } from "./commands.js";
@@ -269,58 +266,6 @@ function registerFromCache(pi: ExtensionAPI): boolean {
   return true;
 }
 
-/**
- * Register fallback models for cold-start when no cache exists
- * and Ollama is unreachable.
- */
-function registerFallbackModels(pi: ExtensionAPI, mode: "local" | "cloud"): void {
-  const fallbacks = mode === "cloud" ? FALLBACK_CLOUD_MODELS : FALLBACK_LOCAL_MODELS;
-  const settings = readSettings();
-  const piModels = fallbacks.map((m) => ({
-    id: m.id,
-    name: m.name,
-    reasoning: m.reasoning,
-    input: m.input,
-    contextWindow: m.contextWindow,
-    maxTokens: m.maxTokens,
-    cost: m.cost,
-  }));
-
-  const baseUrl = mode === "cloud" ? currentConfig.baseUrl : getOllamaHost();
-
-  if (settings.streamingMode === "native") {
-    pi.unregisterProvider(LOCAL_PROVIDER_NAME);
-    pi.registerProvider(LOCAL_PROVIDER_NAME, {
-      baseUrl: `${baseUrl}/v1`,
-      api: "openai-completions",
-      apiKey: currentConfig.apiKey,
-      compat: {
-        supportsDeveloperRole: false,
-        supportsReasoningEffort: false,
-      },
-      models: piModels,
-      streamSimple: createNativeStreamSimple(
-        baseUrl,
-        currentConfig.apiKey,
-        settings,
-      ),
-    });
-  } else {
-    pi.unregisterProvider(LOCAL_PROVIDER_NAME);
-    pi.registerProvider(LOCAL_PROVIDER_NAME, {
-      baseUrl: `${baseUrl}/v1`,
-      api: "openai-completions",
-      apiKey: currentConfig.apiKey,
-      compat: {
-        supportsDeveloperRole: false,
-        supportsReasoningEffort: false,
-      },
-      models: piModels,
-    });
-  }
-
-  console.log(`[ollama] ${fallbacks.length} fallback models registered (${mode} mode)`);
-}
 
 // ── model_select handler ──
 
@@ -381,10 +326,9 @@ export default async function (pi: ExtensionAPI) {
 
   let localProviderReady: Promise<void>;
   if (!hasCache) {
-    // No cache — try to register immediately from API, fall back to fallback models
+    // No cache — try to register immediately from API
     localProviderReady = registerLocalProvider(pi, settings).catch(() => {
-      console.log("[ollama] API discovery failed, registering fallback models");
-      registerFallbackModels(pi, currentConfig.mode);
+      console.log("[ollama] API discovery failed, no models available");
     });
   } else {
     // Has cache — refresh in background
@@ -401,16 +345,9 @@ export default async function (pi: ExtensionAPI) {
       }
     }).catch(() => {
       console.log("[ollama-cloud] registration failed (cloud may be unreachable)");
-      // If cloud mode and fallback needed, register cloud fallback models
-      if (currentConfig.mode === "cloud") {
-        registerFallbackModels(pi, "cloud");
-      }
     });
 
-    // For cloud-only mode without cache, register fallback immediately
-    if (!hasCache && currentConfig.mode === "cloud") {
-      registerFallbackModels(pi, "cloud");
-    }
+    // Cloud-only mode without cache — API registration is attempted above
   }
 
   // ── Register commands ──

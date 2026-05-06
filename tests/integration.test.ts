@@ -22,8 +22,7 @@ import {
   generateModelId,
   extractContextLength,
   getOllamaHost,
-  FALLBACK_LOCAL_MODELS,
-  FALLBACK_CLOUD_MODELS,
+  assembleModelsFromCache,
   // native-stream re-exports
   parseNDJSON,
   convertMessages,
@@ -50,7 +49,7 @@ describe("Extension module exports", () => {
     expect(DEFAULT_CLOUD_URL).toBe("https://ollama.com");
   });
 
-  it("re-exports discovery functions and fallbacks", () => {
+  it("re-exports discovery functions", () => {
     expect(typeof hasVision).toBe("function");
     expect(typeof hasToolSupport).toBe("function");
     expect(typeof hasReasoning).toBe("function");
@@ -58,10 +57,7 @@ describe("Extension module exports", () => {
     expect(typeof generateModelId).toBe("function");
     expect(typeof extractContextLength).toBe("function");
     expect(typeof getOllamaHost).toBe("function");
-    expect(Array.isArray(FALLBACK_LOCAL_MODELS)).toBe(true);
-    expect(Array.isArray(FALLBACK_CLOUD_MODELS)).toBe(true);
-    expect(FALLBACK_LOCAL_MODELS.length).toBeGreaterThanOrEqual(3);
-    expect(FALLBACK_CLOUD_MODELS.length).toBeGreaterThanOrEqual(2);
+    expect(typeof assembleModelsFromCache).toBe("function");
   });
 
   it("re-exports native-stream functions", () => {
@@ -112,27 +108,6 @@ describe("Cross-module compatibility", () => {
     expect(calculateNumCtx(0)).toBe(32768);
     // And uses model's actual context for known models
     expect(calculateNumCtx(131072)).toBe(131072);
-  });
-});
-
-describe("Fallback models cross-module checks", () => {
-  it("all fallback local models have toolSupport flag", () => {
-    const withTools = FALLBACK_LOCAL_MODELS.filter(m => m.toolSupport);
-    expect(withTools.length).toBeGreaterThanOrEqual(1);
-  });
-
-  it("all fallback cloud models support tools (required for coding agent)", () => {
-    for (const m of FALLBACK_CLOUD_MODELS) {
-      expect(m.toolSupport).toBe(true);
-    }
-  });
-
-  it("fallback models have valid context windows", () => {
-    const all = [...FALLBACK_LOCAL_MODELS, ...FALLBACK_CLOUD_MODELS];
-    for (const m of all) {
-      expect(m.contextWindow).toBeGreaterThan(0);
-      expect(m.maxTokens).toBeGreaterThan(0);
-    }
   });
 });
 
