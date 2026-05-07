@@ -193,6 +193,7 @@ export function hasVision(
   capabilities: string[],
   modelInfo: Record<string, unknown>,
   family?: string,
+  modelName?: string,
 ): boolean {
   // Explicit capability flag (Ollama ≥ 0.6)
   if (capabilities.includes("vision")) return true;
@@ -208,6 +209,13 @@ export function hasVision(
   if (family) {
     const lowerFamily = family.toLowerCase();
     if (VISION_ARCHITECTURES.some((v) => lowerFamily.includes(v))) return true;
+  }
+
+  // Name-based heuristic for cloud models with empty metadata
+  if (modelName) {
+    const lower = modelName.toLowerCase();
+    if (VISION_ARCHITECTURES.some((v) => lower.includes(v))) return true;
+    if (lower.includes("kimi") || lower.includes("gemini")) return true;
   }
 
   return false;
@@ -407,7 +415,7 @@ export function assembleModelsFromCache(
     const modelId = generateModelId(model.name, isCloud);
 
     // Capability inference
-    const vision = hasVision(capabilities, modelInfo, family);
+    const vision = hasVision(capabilities, modelInfo, family, model.name);
     const toolSupport = hasToolSupport(capabilities, modelInfo, family, model.name);
     const reasoning = hasReasoning(capabilities, model.name);
 
@@ -604,7 +612,7 @@ export async function discoverModels(
     const modelId = generateModelId(model.name, isCloud);
 
     // Capability inference
-    const vision = hasVision(capabilities, modelInfo, family);
+    const vision = hasVision(capabilities, modelInfo, family, model.name);
     const toolSupport = hasToolSupport(capabilities, modelInfo, family, model.name);
     const reasoning = hasReasoning(capabilities, model.name);
 

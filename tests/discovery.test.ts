@@ -196,8 +196,16 @@ describe("hasVision", () => {
     expect(hasVision([], {}, "llama3.1")).toBe(false);
   });
 
-  it("capabilities take precedence over family", () => {
-    expect(hasVision(["vision"], {}, "llama3.1")).toBe(true);
+  it("detects from model name heuristic", () => {
+    expect(hasVision([], {}, undefined, "kimi-k2.6")).toBe(true);
+    expect(hasVision([], {}, undefined, "gemini-1.5-pro")).toBe(true);
+    expect(hasVision([], {}, undefined, "qwen3-vl:30b")).toBe(true);
+    expect(hasVision([], {}, undefined, "llava:latest")).toBe(true);
+    expect(hasVision([], {}, undefined, "deepseek-v3")).toBe(false);
+  });
+
+  it("capabilities take precedence over name heuristic", () => {
+    expect(hasVision(["vision"], {}, undefined, "any-name")).toBe(true);
   });
 });
 

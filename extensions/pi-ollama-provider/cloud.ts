@@ -196,6 +196,29 @@ function isToolCapableByName(modelId: string): boolean {
   return toolFamilies.some((f) => lower.includes(f));
 }
 
+/**
+ * Heuristic: some model names indicate vision capability even without
+ * the explicit capability flag.
+ */
+function isVisionCapableByName(modelId: string): boolean {
+  const lower = modelId.toLowerCase();
+  const visionFamilies = [
+    "llava",
+    "moondream",
+    "minicpm-v",
+    "phi3-v",
+    "mllama",
+    "llama3.2-vision",
+    "gemma4",
+    "qwen-vl",
+    "qwen2.5-vl",
+    "qwen3-vl",
+    "kimi",
+    "gemini",
+  ];
+  return visionFamilies.some((f) => lower.includes(f));
+}
+
 // ── cloud provider registration ──
 
 /**
@@ -224,7 +247,7 @@ export async function registerCloudProvider(
       reasoning:
         model.capabilities?.includes("thinking") ||
         /\b(r1|deepseek-r1|gemma4|qwen3)\b/i.test(model.id),
-      input: (model.capabilities?.includes("vision")
+      input: (model.capabilities?.includes("vision") || isVisionCapableByName(model.id)
         ? ["text", "image"]
         : ["text"]) as ("text" | "image")[],
       contextWindow,
