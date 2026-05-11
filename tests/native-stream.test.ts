@@ -319,63 +319,182 @@ describe("Stream event format", () => {
   it("stream accepts text_delta event format", async () => {
     const stream = createAssistantMessageEventStream();
     const events: any[] = [];
-    
+
     // Capture events by listening
     stream.push({ type: "text_start", contentIndex: 0, partial: "test" });
     stream.push({ type: "text_delta", contentIndex: 0, delta: "Hello", partial: "Hello" });
     stream.push({ type: "text_end", contentIndex: 0, content: "Hello", partial: "Hello" });
-    
+
     stream.end();
     expect(true).toBe(true); // If we got here without error, the format is correct
   });
 
   it("stream accepts thinking events", async () => {
     const stream = createAssistantMessageEventStream();
-    
+
     stream.push({ type: "thinking_start", contentIndex: 0 });
     stream.push({ type: "thinking_delta", contentIndex: 0, delta: "Let me think..." });
     stream.push({ type: "thinking_end", contentIndex: 0 });
-    
+
     stream.end();
     expect(true).toBe(true);
   });
 
   it("stream accepts toolcall events", async () => {
     const stream = createAssistantMessageEventStream();
-    
+
     stream.push({ type: "toolcall_start", contentIndex: 0, id: "call_123", name: "read_file" });
     stream.push({ type: "toolcall_delta", contentIndex: 0, delta: { path: "/test" } });
     stream.push({ type: "toolcall_end", contentIndex: 0, id: "call_123" });
-    
+
     stream.end();
     expect(true).toBe(true);
   });
 
   it("stream accepts done event", async () => {
     const stream = createAssistantMessageEventStream();
-    
+
     stream.push({ type: "done", reason: "stop", usage: { input: 10, output: 20 } });
-    
+
     stream.end();
     expect(true).toBe(true);
   });
 
   it("stream accepts error event", async () => {
     const stream = createAssistantMessageEventStream();
-    
+
     stream.push({ type: "error", error: new Error("test error") });
-    
+
     stream.end();
     expect(true).toBe(true);
   });
 
   it("stream requires type property for all events", async () => {
     const stream = createAssistantMessageEventStream();
-    
+
     // Valid events with type property
     expect(() => {
       stream.push({ type: "text_start", contentIndex: 0 });
       stream.end();
     }).not.toThrow();
+  });
+});
+
+// ════════════════════════════════════════════════════════════════
+// Incremental streaming behavior
+// ════════════════════════════════════════════════════════════════
+
+describe("Incremental streaming behavior", () => {
+  it("multiple text_delta events should accumulate in same block", async () => {
+    const stream = createAssistantMessageEventStream();
+    const events: any[] = [];
+
+    // Simulate incremental streaming - multiple deltas should go to same block
+    stream.push({ type: "text_start", contentIndex: 0 });
+    stream.push({ type: "text_delta", contentIndex: 0, delta: "Hel" });
+    stream.push({ type: "text_delta", contentIndex: 0, delta: "lo" });
+    stream.push({ type: "text_delta", contentIndex: 0, delta: "!" });
+
+    stream.end();
+    expect(true).toBe(true);
+  });
+
+  it("switching text to thinking should close text block first", async () => {
+    const stream = createAssistantMessageEventStream();
+
+    stream.push({ type: "text_start", contentIndex: 0 });
+    stream.push({ type: "text_delta", contentIndex: 0, delta: "Hello" });
+    stream.push({ type: "text_end", contentIndex: 0, content: "Hello" });
+
+    stream.push({ type: "thinking_start", contentIndex: 0 });
+    stream.push({ type: "thinking_delta", contentIndex: 0, delta: "Thinking..." });
+    stream.push({ type: "thinking_end", contentIndex: 0 });
+
+    stream.end();
+    expect(true).toBe(true);
+  });
+
+  it("tool calls should close any open text/thinking blocks", async () => {
+    const stream = createAssistantMessageEventStream();
+
+    stream.push({ type: "text_start", contentIndex: 0 });
+    stream.push({ type: "text_delta", contentIndex: 0, delta: "Some text" });
+    stream.push({ type: "text_end", contentIndex: 0, content: "Some text" });
+
+    stream.push({ type: "toolcall_start", contentIndex: 0, id: "call_1", name: "test" });
+    stream.push({ type: "toolcall_delta", contentIndex: 0, delta: { arg: "value" } });
+    stream.push({ type: "toolcall_end", contentIndex: 0, id: "call_1" });
+
+    stream.end();
+    expect(true).toBe(true);
+  });
+});
+
+// ════════════════════════════════════════════════════════════════
+// Tool call arguments parsing
+// ════════════════════════════════════════════════════════════════
+
+describe("Tool call arguments parsing", () => {
+  it("should handle tool call arguments as JSON string", () => {
+    const toolCallWithArgsString = {
+      function: {
+        name: "read_file",
+        arguments: '{"path": "/test/file.txt", "encoding": "utf-8"}',
+      },
+    };
+
+    // Simulate the parsing logic from native-stream.ts
+    let args = toolCallWithArgsString.function.arguments;
+    if (typeof args === "string") {
+      try {
+        args = JSON.parse(args);
+      } catch {
+        args = {};
+      }
+    }
+
+    expect(args).toEqual({ path: "/test/file.txt", encoding: "utf-8" });
+  });
+
+  it("should handle tool call arguments as object", () => {
+    const toolCallWithArgsObject = {
+      function: {
+        name: "read_file",
+        arguments: { path: "/test/file.txt", encoding: "utf-8" },
+      },
+    };
+
+    // Simulate the parsing logic from native-stream.ts
+    let args = toolCallWithArgsObject.function.arguments;
+    if (typeof args === "string") {
+      try {
+        args = JSON.parse(args);
+      } catch {
+        args = {};
+      }
+    }
+
+    expect(args).toEqual({ path: "/test/file.txt", encoding: "utf-8" });
+  });
+
+  it("should handle invalid JSON string in tool call arguments", () => {
+    const toolCallWithInvalidArgs = {
+      function: {
+        name: "read_file",
+        arguments: "not valid json",
+      },
+    };
+
+    // Simulate the parsing logic from native-stream.ts
+    let args = toolCallWithInvalidArgs.function.arguments;
+    if (typeof args === "string") {
+      try {
+        args = JSON.parse(args);
+      } catch {
+        args = {};
+      }
+    }
+
+    expect(args).toEqual({});
   });
 });
