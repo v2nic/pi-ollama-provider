@@ -37,6 +37,11 @@ import {
   readSettings,
   writeSettings,
   validateSettings,
+  // log-buffer re-exports
+  logWarn,
+  logError,
+  getLogEntries,
+  formatStatusLine,
 } from "../extensions/pi-ollama-provider/index.js";
 
 describe("Extension module exports", () => {
@@ -78,6 +83,13 @@ describe("Extension module exports", () => {
     expect(typeof readSettings).toBe("function");
     expect(typeof writeSettings).toBe("function");
     expect(typeof validateSettings).toBe("function");
+  });
+
+  it("re-exports log-buffer functions", () => {
+    expect(typeof logWarn).toBe("function");
+    expect(typeof logError).toBe("function");
+    expect(typeof getLogEntries).toBe("function");
+    expect(typeof formatStatusLine).toBe("function");
   });
 });
 

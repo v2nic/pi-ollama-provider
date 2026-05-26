@@ -26,6 +26,7 @@
  * - Cache versioning for forward-compatible model discovery
  * - Atomic settings writes to prevent corruption
  * - Settings validation with warning logs
+ * - Structured log buffer for TUI status bar (no console.log noise)
  *
  * Auth storage: uses pi's AuthStorage for full resolution priority:
  *   1. Runtime overrides (CLI --api-key flag)
@@ -68,6 +69,7 @@ import { registerCloudProvider, registerCloudTools } from "./cloud.js";
 import { streamNativeChat } from "./native-stream.js";
 import { isOllamaContextOverflow as isOverflowFromSafety, calculateNumCtx, getDefaultKeepAlive } from "./context-safety.js";
 import { readSettings, writeSettings, handleStatusCommand, handleInfoCommand, handlePullCommand, runSetupWizard, type OllamaSettings } from "./commands.js";
+import { logWarn, logError, getLogEntries, formatStatusLine } from "./log-buffer.js";
 
 // Re-export for testing
 export { resolveConfig, resolveConfigAsync, readOllamaAuthFromJson, describeAuthSource, DEFAULT_LOCAL_URL, DEFAULT_CLOUD_URL } from "./auth.js";
@@ -78,6 +80,7 @@ export { isOllamaContextOverflow as isOllamaOverflowFromSafety, calculateNumCtx,
 export { readSettings, writeSettings, validateSettings, type SettingsValidationIssue, type OllamaSettings } from "./commands.js";
 export { createRenderResult, createApiKeyResolver, formatSearchResults, formatFetchResult, fetchCloudModels, fetchCloudModelDetails, registerCloudProvider, registerCloudTools } from "./cloud.js";
 export type { SearchResult, FetchResult, ApiKeyResolver } from "./cloud.js";
+export { logWarn, logError, getLogEntries, formatStatusLine, type LogEntry } from "./log-buffer.js";
 
 const LOCAL_PROVIDER_NAME = "ollama";
 const CLOUD_PROVIDER_NAME = "ollama-cloud";
@@ -132,9 +135,8 @@ function createNativeStreamSimple(
       ollamaOptions,
       signal: options?.signal,
       keepAlive: settings.keepAlive || getDefaultKeepAlive(),
-    }).catch((err) => {
+    }).catch(() => {
       // Errors are already pushed to the stream via error events
-      console.error("[ollama] Stream error:", err);
     });
 
     return stream;
@@ -222,10 +224,6 @@ async function registerLocalProvider(pi: ExtensionAPI, settings: OllamaSettings)
 
   // Update cache for instant next startup (raw API data)
   writeModelCache(result.rawCacheData);
-
-  console.log(
-    `[ollama] ${modelConfigs.length} models registered (streaming: ${settings.streamingMode || "native"})`,
-  );
 }
 
 /**
@@ -291,7 +289,6 @@ function registerFromCache(pi: ExtensionAPI): boolean {
     });
   }
 
-  console.log(`[ollama] ${modelConfigs.length} models from cache (v${cached.version}, ${Math.round((Date.now() - cached.timestamp) / 3600000)}h old)`);
   return true;
 }
 
@@ -308,16 +305,13 @@ function handleModelSelect(
     if (!modelId || localModelNames.has(modelId)) return;
 
     // Auto-pull disabled?
-    if (settings.autoPull === false) {
-      console.log(`[ollama] auto-pull disabled; ${modelId} not available locally`);
-      return;
-    }
+    if (settings.autoPull === false) return;
 
     // Interactive confirmation for large downloads
     try {
       await handlePullCommand(modelId, event, getOllamaHost(), currentConfig.apiKey);
-    } catch (err) {
-      console.error(`[ollama] auto-pull failed: ${modelId}: ${err}`);
+    } catch {
+      // Auto-pull failed — non-fatal, user can pull manually
     }
   };
 }
@@ -330,13 +324,10 @@ export default async function (pi: ExtensionAPI) {
   // Resolve config with sync fallback for immediate cache registration
   currentConfig = resolveConfig();
 
-  // Log auth source at startup
+  // Auth source (for /ollama-status display, not logged to TUI)
   const authSource = describeAuthSource(currentConfig);
-  if (currentConfig.apiKey !== "ollama") {
-    console.log(`[ollama] API key from ${authSource}`);
-  }
 
-  // Read extension settings
+  // Read extension settings (warnings are buffered, not logged)
   const settings = readSettings();
 
   // ── Register local Ollama provider with cache ──
@@ -357,7 +348,9 @@ export default async function (pi: ExtensionAPI) {
   if (!hasCache) {
     // No cache — try to register immediately from API
     localProviderReady = registerLocalProvider(pi, settings).catch(() => {
-      console.log("[ollama] API discovery failed, no models available");
+      // Discovery failed — no local models available, cache still empty.
+      // Status bar will show the error after session_start.
+      logError("local", "API discovery failed, no models available");
     });
   } else {
     // Has cache — refresh in background
@@ -369,11 +362,12 @@ export default async function (pi: ExtensionAPI) {
   if (currentConfig.mode === "cloud" || currentConfig.apiKey !== "ollama") {
     registerCloudProvider(pi, currentConfig.apiKey).then((count) => {
       if (count > 0) {
-        // Register web tools regardless of model count — they work with any cloud API key
         registerCloudTools(pi, currentConfig.apiKey);
       }
     }).catch(() => {
-      console.log("[ollama-cloud] registration failed (cloud may be unreachable)");
+      // Cloud registration failed — non-fatal, local models still work.
+      // Status bar will show the error after session_start.
+      logError("cloud", "registration failed (cloud may be unreachable)");
     });
 
     // Cloud-only mode without cache — API registration is attempted above
@@ -399,7 +393,7 @@ export default async function (pi: ExtensionAPI) {
   pi.registerCommand("ollama-refresh", {
     description: "Re-discover Ollama models",
     handler: async (_args, ctx) => {
-      ctx.ui.notify("[ollama] Discovering models...", "info");
+      ctx.ui.notify("Discovering models...", "info");
       await registerLocalProvider(pi, readSettings());
     },
   });
@@ -451,6 +445,13 @@ export default async function (pi: ExtensionAPI) {
   // ── Event handlers ──
 
   pi.on("model_select", handleModelSelect(pi, settings));
+
+  // ── Show buffered errors/warnings in status bar on session start ──
+
+  pi.on("session_start", (_event, ctx) => {
+    const status = formatStatusLine();
+    ctx.ui.setStatus("ollama", status ?? undefined);
+  });
 
   // Wait for local provider to be ready if no cache was available
   await localProviderReady;

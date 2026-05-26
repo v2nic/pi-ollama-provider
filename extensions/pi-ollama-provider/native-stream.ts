@@ -16,6 +16,7 @@
 
 import type { AssistantMessageEventStream } from "@mariozechner/pi-ai";
 import { Readable } from "node:stream";
+import { logWarn } from "./log-buffer.js";
 
 // ── types ──
 
@@ -618,7 +619,7 @@ export async function streamNativeChat(
     if (output.content.length === 0 && chunks.length > 0) {
       if (isGhostTokenStream(chunks)) {
         // Retry with stream: false
-        console.log("[ollama] Ghost token detected — retrying with stream: false");
+        logWarn("stream", "Ghost token detected — retrying with stream: false");
         await retryNonStreaming(baseUrl, headers, body, stream, output);
         return;
       }

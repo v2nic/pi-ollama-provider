@@ -19,6 +19,7 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-cod
 import { readFileSync, writeFileSync, existsSync, renameSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { homedir, tmpdir } from "node:os";
+import { logWarn, logError, getRecentEntries } from "./log-buffer.js";
 
 const SETTINGS_PATH = join(homedir(), ".pi", "agent", "settings.json");
 
@@ -179,11 +180,7 @@ export function readSettings(): OllamaSettings {
     const parsed = JSON.parse(data);
     const ollamaSection = parsed?.ollama ?? {};
 
-    const { validated, issues } = validateSettings(ollamaSection);
-
-    for (const issue of issues) {
-      console.log(`[ollama] Settings warning: ${issue.message}`);
-    }
+    const { validated } = validateSettings(ollamaSection);
 
     return validated;
   } catch {
@@ -198,10 +195,7 @@ export function readSettings(): OllamaSettings {
 export function writeSettings(settings: OllamaSettings): void {
   try {
     // Validate before writing
-    const { validated, issues } = validateSettings(settings);
-    for (const issue of issues) {
-      console.log(`[ollama] Settings warning: ${issue.message}`);
-    }
+    const { validated } = validateSettings(settings);
 
     let existing: Record<string, unknown> = {};
     try {
@@ -226,9 +220,7 @@ export function writeSettings(settings: OllamaSettings): void {
       } catch {}
     }
   } catch (err) {
-    console.log(
-      `[ollama] settings write failed: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    logError("settings", `settings write failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
@@ -314,6 +306,17 @@ export async function handleStatusCommand(
       .map(([k, v]) => `${k}=${v}`)
       .join(", ");
     lines.push(`   Options: ${optStrs}`);
+  }
+
+  // Recent log entries
+  const recent = getRecentEntries(5);
+  if (recent.length > 0) {
+    lines.push("\n📋 **Recent Log**:");
+    for (const entry of recent) {
+      const time = new Date(entry.timestamp).toLocaleTimeString();
+      const icon = entry.level === "error" ? "❌" : "⚠️";
+      lines.push(`  ${icon} [${time}] ${entry.source}: ${entry.message}`);
+    }
   }
 
   ctx.ui.setStatus("ollama-status", undefined);

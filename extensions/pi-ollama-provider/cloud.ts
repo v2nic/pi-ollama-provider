@@ -35,6 +35,7 @@ import {
   extractContextLength,
   type OllamaShowResponse,
 } from "./discovery.js";
+import { logWarn, logError } from "./log-buffer.js";
 
 const CLOUD_PROVIDER_NAME = "ollama-cloud";
 
@@ -136,7 +137,7 @@ export async function fetchCloudModels(
       },
     });
     if (!res.ok) {
-      console.log(`[ollama-cloud] /v1/models failed: HTTP ${res.status}`);
+      logError("cloud", `/v1/models failed: HTTP ${res.status}`);
       return [];
     }
     const data = await res.json();
@@ -153,9 +154,7 @@ export async function fetchCloudModels(
       hasToolSupport(m.capabilities || [], {}, undefined, m.id),
     );
   } catch (err) {
-    console.log(
-      `[ollama-cloud] unavailable: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    logError("cloud", `unavailable: ${err instanceof Error ? err.message : String(err)}`);
     return [];
   }
 }
@@ -200,7 +199,7 @@ export async function registerCloudProvider(
   const clouds = await fetchCloudModels(apiKey);
 
   if (clouds.length === 0) {
-    console.log("[ollama-cloud] no tool-capable models found");
+    logWarn("cloud", "no tool-capable models found");
     pi.unregisterProvider(CLOUD_PROVIDER_NAME);
     return 0;
   }
@@ -267,7 +266,7 @@ export async function registerCloudProvider(
     models: modelConfigs,
   });
 
-  console.log(`[ollama-cloud] ${modelConfigs.length} tool-capable models registered`);
+  // Models registered silently — visible in /ollama-status
   return modelConfigs.length;
 }
 
@@ -380,7 +379,7 @@ export function formatFetchResult(data: FetchResult): string {
  */
 export function registerCloudTools(pi: ExtensionAPI, apiKey: string): void {
   if (WEB_TOOLS_DISABLED) {
-    console.log("[ollama-cloud] web tools disabled (PI_OLLAMA_WEB_TOOLS=0)");
+    logWarn("cloud", "web tools disabled (PI_OLLAMA_WEB_TOOLS=0)");
     return;
   }
 
@@ -590,5 +589,5 @@ export function registerCloudTools(pi: ExtensionAPI, apiKey: string): void {
     renderResult,
   });
 
-  console.log("[ollama-cloud] ollama_web_search + ollama_web_fetch tools registered (enabled by default)");
+  // Web tools registered silently — visible in /ollama-status
 }

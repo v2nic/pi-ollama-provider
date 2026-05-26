@@ -26,6 +26,7 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { logWarn, logError } from "./log-buffer.js";
 
 // ── types ──
 
@@ -315,7 +316,7 @@ export function readModelCache(): OllamaModelCache | null {
 
     // v1 format: flat array of OllamaModelConfig — discard gracefully
     if (Array.isArray(parsed)) {
-      console.log("[ollama] discarding v1 cache (upgrading to v2 raw format)");
+      logWarn("cache", "discarding v1 cache (upgrading to v2 raw format)");
       return null;
     }
 
@@ -325,7 +326,7 @@ export function readModelCache(): OllamaModelCache | null {
     }
 
     // Unknown format — discard
-    console.log(`[ollama] discarding unknown cache format (version=${parsed.version})`);
+    logWarn("cache", `discarding unknown cache format (version=${parsed.version})`);
     return null;
   } catch {
     return null;
@@ -354,9 +355,7 @@ export function writeModelCache(cache: OllamaModelCache): void {
       "utf-8",
     );
   } catch (err) {
-    console.log(
-      `[ollama] cache write failed: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    logError("cache", `cache write failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
@@ -460,9 +459,7 @@ export async function fetchLocalModels(
     const data = await res.json();
     return data.models || [];
   } catch (err) {
-    console.log(
-      `[ollama] unavailable (${baseUrl}): ${err instanceof Error ? err.message : String(err)}`,
-    );
+    logError("local", `server unreachable (${baseUrl}): ${err instanceof Error ? err.message : String(err)}`);
     return [];
   }
 }
@@ -566,7 +563,7 @@ export async function discoverModels(
   // Check which models are currently loaded (optional, best-effort)
   const loadedModels = await fetchLoadedModels(baseUrl, apiKey);
 
-  console.log(`[ollama] ${tagsModels.length} models discovered`);
+  // Models discovered — no TUI log needed
 
   const modelConfigs: OllamaModelConfig[] = tagsModels.map((model) => {
     const details = detailResults.get(model.name);
