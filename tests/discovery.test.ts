@@ -3,10 +3,25 @@
  * cache, and OLLAMA_API_BASE.
  */
 
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from "vitest";
 import { writeFileSync, mkdirSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
+
+const isolatedHomeState = vi.hoisted(() => ({ path: "" }));
+
+vi.mock("node:os", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:os")>();
+  const { join: joinPath } = await import("node:path");
+  isolatedHomeState.path = joinPath(
+    actual.tmpdir(),
+    `pi-ollama-provider-discovery-${process.pid}`,
+  );
+
+  return {
+    ...actual,
+    homedir: () => isolatedHomeState.path,
+  };
+});
 
 import {
   hasVision,
@@ -27,6 +42,16 @@ import {
   writeModelCache,
   CACHE_PATH,
 } from "../extensions/pi-ollama-provider/discovery.js";
+
+it("isolates cache fixtures under a dedicated temp home", () => {
+  expect(CACHE_PATH).toBe(
+    join(isolatedHomeState.path, ".pi", "agent", "ollama-models-cache.json"),
+  );
+});
+
+afterAll(() => {
+  rmSync(isolatedHomeState.path, { recursive: true, force: true });
+});
 
 // ════════════════════════════════════════════════════════════════
 // Cache v2 format (raw API responses)
